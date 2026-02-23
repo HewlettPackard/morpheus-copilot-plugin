@@ -15,10 +15,10 @@
  */
 package com.morpheusdata.copilot
 
-import com.morpheusdata.model.llmEngine.LLMEngineChatMessage
-import com.morpheusdata.model.llmEngine.LLMEngineChatResponse
-import com.morpheusdata.model.llmEngine.LLMEngineTokenUsage
-import com.morpheusdata.response.LLMEngineStreamingResponseHandler
+import com.morpheusdata.model.languageModel.LanguageModelChatMessage
+import com.morpheusdata.model.languageModel.LanguageModelChatResponse
+import com.morpheusdata.model.languageModel.LanguageModelTokenUsage
+import com.morpheusdata.response.LanguageModelStreamingResponseHandler
 import groovy.json.JsonBuilder
 import groovy.json.JsonSlurper
 import groovy.util.logging.Slf4j
@@ -54,7 +54,7 @@ class CopilotApiService {
 	/**
 	 * Execute a streaming chat completion request via SSE.
 	 */
-	void streamChatCompletion(String baseUrl, String token, Map requestBody, LLMEngineStreamingResponseHandler handler) {
+	void streamChatCompletion(String baseUrl, String token, Map requestBody, LanguageModelStreamingResponseHandler handler) {
 		HttpURLConnection connection = null
 		try {
 			requestBody.stream = true
@@ -115,10 +115,10 @@ class CopilotApiService {
 				}
 			}
 
-			LLMEngineChatResponse response = new LLMEngineChatResponse()
+			LanguageModelChatResponse response = new LanguageModelChatResponse()
 			response.model = responseModel
 			response.finishReason = finishReason
-			LLMEngineChatMessage msg = new LLMEngineChatMessage()
+			LanguageModelChatMessage msg = new LanguageModelChatMessage()
 			msg.role = 'assistant'
 			msg.content = fullContent.toString()
 			response.message = msg

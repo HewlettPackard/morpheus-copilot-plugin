@@ -18,17 +18,17 @@ package com.morpheusdata.copilot
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
-import com.morpheusdata.core.providers.LLMEngineIntegrationProvider
+import com.morpheusdata.core.providers.LanguageModelIntegrationProvider
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.Icon
 import com.morpheusdata.model.OptionType
-import com.morpheusdata.model.llmEngine.*
-import com.morpheusdata.response.LLMEngineStreamingResponseHandler
+import com.morpheusdata.model.languageModel.*
+import com.morpheusdata.response.LanguageModelStreamingResponseHandler
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 
 /**
- * LLMEngineIntegrationProvider implementation for GitHub Copilot.
+ * LanguageModelIntegrationProvider implementation for GitHub Copilot.
  * GitHub Copilot exposes an OpenAI-compatible API that provides access
  * to multiple LLM providers (OpenAI, Anthropic, Google) through a single endpoint.
  * Supports chat completion, streaming chat, and embeddings.
@@ -36,7 +36,7 @@ import groovy.util.logging.Slf4j
  * @author Morpheus
  */
 @Slf4j
-class CopilotProvider implements LLMEngineIntegrationProvider {
+class CopilotProvider implements LanguageModelIntegrationProvider {
 
 	Plugin plugin
 	MorpheusContext morpheusContext
@@ -80,8 +80,8 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	@Override
-	LLMEngineIntegrationType getLLMEngineIntegrationType() {
-		LLMEngineIntegrationType type = new LLMEngineIntegrationType()
+	LanguageModelIntegrationType getLanguageModelIntegrationType() {
+		LanguageModelIntegrationType type = new LanguageModelIntegrationType()
 		type.code = PROVIDER_CODE
 		type.name = PROVIDER_NAME
 		type.providerService = PROVIDER_CODE
@@ -94,18 +94,24 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 	@Override
 	List<OptionType> getIntegrationOptionTypes() {
-		List<OptionType> optionTypes = LLMEngineIntegrationProvider.defaultOptionTypes(PROVIDER_CODE)
-		// Set Copilot default endpoint
-		optionTypes.find { it.fieldName == 'serviceUrl' }?.defaultValue = DEFAULT_API_URL
+		List<OptionType> optionTypes = LanguageModelIntegrationProvider.defaultOptionTypes(PROVIDER_CODE)
+		// Set default Copilot API URL
+		optionTypes.find { it.fieldName == 'serviceUrl' }?.setDefaultValue(DEFAULT_API_URL)
 		// Copilot uses a GitHub token – only API key field is relevant
-		optionTypes.find { it.fieldName == 'serviceUsername' }?.required = false
-		optionTypes.find { it.fieldName == 'servicePassword' }?.required = false
-		// Relabel token field for GitHub context
-		def tokenOpt = optionTypes.find { it.fieldName == 'serviceToken' }
-		if (tokenOpt) {
-			tokenOpt.name = 'GitHub Token'
-			tokenOpt.fieldLabel = 'GitHub Token'
-		}
+		OptionType credentials = new OptionType();
+		credentials.setCode(PROVIDER_CODE + ".credential");
+		credentials.setName("Credentials");
+		credentials.setInputType(OptionType.InputType.CREDENTIAL);
+		credentials.setFieldName("type");
+		credentials.setFieldLabel("Credentials");
+		credentials.setFieldContext("credential");
+		credentials.setRequired(true);
+		credentials.setDisplayOrder(1);
+		credentials.setDefaultValue("local");
+		credentials.setOptionSource("credentials");
+		credentials.setConfig("{\"credentialTypes\":[\"api-key\"]}");
+		optionTypes.add(credentials);
+
 		return optionTypes
 	}
 
@@ -151,14 +157,14 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	@Override
-	ServiceResponse<LLMEngineCapabilities> getCapabilities(AccountIntegration accountIntegration, Map opts) {
+	ServiceResponse<LanguageModelCapabilities> getCapabilities(AccountIntegration accountIntegration, Map opts) {
 		try {
-			LLMEngineCapabilities capabilities = new LLMEngineCapabilities()
+			LanguageModelCapabilities capabilities = new LanguageModelCapabilities()
 			capabilities.chatSupported = true
 			capabilities.streamingChatSupported = true
 			capabilities.embeddingSupported = true
 
-			List<LLMEngineModel> models = loadPersistedModels(accountIntegration)
+			List<LanguageModel> models = loadPersistedModels(accountIntegration)
 			if (!models) {
 				String token = resolveToken(accountIntegration)
 				String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
@@ -178,7 +184,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	@Override
-	ServiceResponse<LLMEngineChatResponse> chatCompletion(AccountIntegration accountIntegration, LLMEngineChatRequest request, Map opts) {
+	ServiceResponse<LanguageModelChatResponse> chatCompletion(AccountIntegration accountIntegration, LanguageModelChatRequest request, Map opts) {
 		try {
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
@@ -208,7 +214,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 			def result = apiService.chatCompletion(baseUrl, token, requestBody)
 			if (result.success && result.data) {
-				LLMEngineChatResponse response = parseChatResponse(result.data)
+				LanguageModelChatResponse response = parseChatResponse(result.data)
 				return ServiceResponse.success(response)
 			} else {
 				return ServiceResponse.error(result.msg ?: 'Chat completion failed')
@@ -220,7 +226,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	@Override
-	void streamChatCompletion(AccountIntegration accountIntegration, LLMEngineChatRequest request, LLMEngineStreamingResponseHandler handler, Map opts) {
+	void streamChatCompletion(AccountIntegration accountIntegration, LanguageModelChatRequest request, LanguageModelStreamingResponseHandler handler, Map opts) {
 		try {
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
@@ -253,7 +259,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	@Override
-	ServiceResponse<LLMEngineEmbeddingResponse> generateEmbeddings(AccountIntegration accountIntegration, LLMEngineEmbeddingRequest request, Map opts) {
+	ServiceResponse<LanguageModelEmbeddingResponse> generateEmbeddings(AccountIntegration accountIntegration, LanguageModelEmbeddingRequest request, Map opts) {
 		try {
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
@@ -266,7 +272,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 			def result = apiService.createEmbeddings(baseUrl, token, requestBody)
 			if (result.success && result.data) {
-				LLMEngineEmbeddingResponse response = parseEmbeddingResponse(result.data, model)
+				LanguageModelEmbeddingResponse response = parseEmbeddingResponse(result.data, model)
 				return ServiceResponse.success(response)
 			} else {
 				return ServiceResponse.error(result.msg ?: 'Embedding generation failed')
@@ -284,15 +290,15 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	 * New models are created, removed models are disabled, reappearing models are re-enabled.
 	 */
 	protected void syncModels(AccountIntegration accountIntegration, Map apiResponse) {
-		List<LLMEngineModel> freshModels = buildModelsFromApiResponse(apiResponse)
+		List<LanguageModel> freshModels = buildModelsFromApiResponse(apiResponse)
 		Set<String> freshCodes = freshModels.collect { it.code } as Set
 
-		List<LLMEngineModel> existingModels = loadPersistedModels(accountIntegration)
-		Map<String, LLMEngineModel> existingByCode = existingModels.collectEntries { [(it.code): it] }
+		List<LanguageModel> existingModels = loadPersistedModels(accountIntegration)
+		Map<String, LanguageModel> existingByCode = existingModels.collectEntries { [(it.code): it] }
 
-		def modelService = morpheusContext.async.getLLMEngineModel()
-		List<LLMEngineModel> toSave = []
-		List<LLMEngineModel> toCreate = []
+		def modelService = morpheusContext.async.getLanguageModel()
+		List<LanguageModel> toSave = []
+		List<LanguageModel> toCreate = []
 
 		// Disable models that no longer appear in the API
 		existingByCode.each { code, model ->
@@ -305,7 +311,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 		// Add new models, re-enable ones that reappear
 		freshModels.each { freshModel ->
-			LLMEngineModel existing = existingByCode[freshModel.code]
+			LanguageModel existing = existingByCode[freshModel.code]
 			if (existing) {
 				boolean changed = false
 				if (!existing.enabled) {
@@ -345,9 +351,9 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	/**
 	 * Load persisted models for this integration from the DataService.
 	 */
-	protected List<LLMEngineModel> loadPersistedModels(AccountIntegration accountIntegration) {
+	protected List<LanguageModel> loadPersistedModels(AccountIntegration accountIntegration) {
 		try {
-			def modelService = morpheusContext.async.getLLMEngineModel()
+			def modelService = morpheusContext.async.getLanguageModel()
 			return modelService.list(
 				new DataQuery().withFilter('providerCode', PROVIDER_CODE)
 			).toList().blockingGet() ?: []
@@ -365,17 +371,17 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	/**
-	 * Build LLMEngineModel list from the Copilot /models API response.
+	 * Build LanguageModel list from the Copilot /models API response.
 	 * Copilot returns models from multiple providers (OpenAI, Anthropic, Google).
 	 */
-	protected List<LLMEngineModel> buildModelsFromApiResponse(Map apiResponse) {
-		List<LLMEngineModel> models = []
+	protected List<LanguageModel> buildModelsFromApiResponse(Map apiResponse) {
+		List<LanguageModel> models = []
 		def modelData = apiResponse?.data
 		if (modelData instanceof List) {
 			modelData.each { entry ->
 				String modelId = entry.id?.toString()
 				if (modelId && isChatOrEmbeddingModel(modelId)) {
-					LLMEngineModel model = new LLMEngineModel()
+					LanguageModel model = new LanguageModel()
 					model.code = modelId
 					model.externalId = modelId
 					model.name = entry.name?.toString() ?: formatModelName(modelId)
@@ -460,10 +466,10 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	/**
-	 * Parse OpenAI-compatible chat completion response into LLMEngineChatResponse.
+	 * Parse OpenAI-compatible chat completion response into LanguageModelChatResponse.
 	 */
-	protected LLMEngineChatResponse parseChatResponse(Map data) {
-		LLMEngineChatResponse response = new LLMEngineChatResponse()
+	protected LanguageModelChatResponse parseChatResponse(Map data) {
+		LanguageModelChatResponse response = new LanguageModelChatResponse()
 		response.id = data.id?.toString()
 		response.model = data.model?.toString()
 
@@ -473,7 +479,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 			response.finishReason = choice.finish_reason?.toString()
 			def messageData = choice.message
 			if (messageData) {
-				LLMEngineChatMessage msg = new LLMEngineChatMessage()
+				LanguageModelChatMessage msg = new LanguageModelChatMessage()
 				msg.role = messageData.role?.toString() ?: 'assistant'
 				msg.content = messageData.content?.toString()
 				response.message = msg
@@ -482,7 +488,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 		def usage = data.usage
 		if (usage) {
-			LLMEngineTokenUsage tokenUsage = new LLMEngineTokenUsage()
+			LanguageModelTokenUsage tokenUsage = new LanguageModelTokenUsage()
 			tokenUsage.inputTokens = usage.prompt_tokens as Integer
 			tokenUsage.outputTokens = usage.completion_tokens as Integer
 			tokenUsage.totalTokens = usage.total_tokens as Integer
@@ -493,10 +499,10 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 	}
 
 	/**
-	 * Parse OpenAI-compatible embeddings response into LLMEngineEmbeddingResponse.
+	 * Parse OpenAI-compatible embeddings response into LanguageModelEmbeddingResponse.
 	 */
-	protected LLMEngineEmbeddingResponse parseEmbeddingResponse(Map data, String model) {
-		LLMEngineEmbeddingResponse response = new LLMEngineEmbeddingResponse()
+	protected LanguageModelEmbeddingResponse parseEmbeddingResponse(Map data, String model) {
+		LanguageModelEmbeddingResponse response = new LanguageModelEmbeddingResponse()
 		response.model = data.model?.toString() ?: model
 
 		def embeddingData = data.data
@@ -512,7 +518,7 @@ class CopilotProvider implements LLMEngineIntegrationProvider {
 
 		def usage = data.usage
 		if (usage) {
-			LLMEngineTokenUsage tokenUsage = new LLMEngineTokenUsage()
+			LanguageModelTokenUsage tokenUsage = new LanguageModelTokenUsage()
 			tokenUsage.inputTokens = usage.prompt_tokens as Integer
 			tokenUsage.totalTokens = usage.total_tokens as Integer
 			response.tokenUsage = tokenUsage

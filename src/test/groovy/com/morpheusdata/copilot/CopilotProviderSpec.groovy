@@ -19,10 +19,10 @@ import com.morpheusdata.core.MorpheusAsyncServices
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
-import com.morpheusdata.core.integration.MorpheusLLMEngineModelService
+import com.morpheusdata.core.integration.MorpheusLanguageModelService
 import com.morpheusdata.model.AccountIntegration
-import com.morpheusdata.model.llmEngine.*
-import com.morpheusdata.response.LLMEngineStreamingResponseHandler
+import com.morpheusdata.model.languageModel.*
+import com.morpheusdata.response.LanguageModelStreamingResponseHandler
 import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.core.Single
 import spock.lang.Specification
@@ -33,17 +33,17 @@ class CopilotProviderSpec extends Specification {
 	Plugin plugin
 	MorpheusContext morpheusContext
 	MorpheusAsyncServices asyncServices
-	MorpheusLLMEngineModelService modelService
+	MorpheusLanguageModelService modelService
 	CopilotApiService apiService
 
 	def setup() {
 		plugin = Mock(Plugin)
 		morpheusContext = Mock(MorpheusContext)
 		asyncServices = Mock(MorpheusAsyncServices)
-		modelService = Mock(MorpheusLLMEngineModelService)
+		modelService = Mock(MorpheusLanguageModelService)
 
 		morpheusContext.getAsync() >> asyncServices
-		asyncServices.getLLMEngineModel() >> modelService
+		asyncServices.getLanguageModel() >> modelService
 		modelService.list(_) >> Observable.empty()
 		modelService.bulkCreate(_) >> Single.just(true)
 		modelService.bulkSave(_) >> Single.just(true)
@@ -71,9 +71,9 @@ class CopilotProviderSpec extends Specification {
 		provider.getIcon().darkPath == 'copilot-white.svg'
 	}
 
-	def "provider returns LLMEngineIntegrationType"() {
+	def "provider returns LanguageModelIntegrationType"() {
 		when:
-		def type = provider.getLLMEngineIntegrationType()
+		def type = provider.getLanguageModelIntegrationType()
 
 		then:
 		type.code == 'github-copilot'
@@ -93,8 +93,8 @@ class CopilotProviderSpec extends Specification {
 		opts.size() >= 1
 		def urlOpt = opts.find { it.fieldName == 'serviceUrl' }
 		urlOpt.defaultValue == 'https://api.githubcopilot.com'
-		def tokenOpt = opts.find { it.fieldName == 'serviceToken' }
-		tokenOpt.name == 'GitHub Token'
+		def credOpt = opts.find { it.fieldContext == 'credential' }
+		credOpt.name == 'Credentials'
 	}
 
 	// --- Verify ---
@@ -154,9 +154,9 @@ class CopilotProviderSpec extends Specification {
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LLMEngineChatRequest request = new LLMEngineChatRequest()
+		LanguageModelChatRequest request = new LanguageModelChatRequest()
 		request.model = 'gpt-4o'
-		LLMEngineChatMessage msg = new LLMEngineChatMessage()
+		LanguageModelChatMessage msg = new LanguageModelChatMessage()
 		msg.role = 'user'
 		msg.content = 'Hello'
 		request.messages = [msg]
@@ -190,8 +190,8 @@ class CopilotProviderSpec extends Specification {
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LLMEngineChatRequest request = new LLMEngineChatRequest()
-		LLMEngineChatMessage msg = new LLMEngineChatMessage()
+		LanguageModelChatRequest request = new LanguageModelChatRequest()
+		LanguageModelChatMessage msg = new LanguageModelChatMessage()
 		msg.role = 'user'
 		msg.content = 'Test'
 		request.messages = [msg]
@@ -209,7 +209,7 @@ class CopilotProviderSpec extends Specification {
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LLMEngineChatRequest request = new LLMEngineChatRequest()
+		LanguageModelChatRequest request = new LanguageModelChatRequest()
 		request.model = 'gpt-4o'
 		request.messages = []
 
@@ -230,13 +230,13 @@ class CopilotProviderSpec extends Specification {
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LLMEngineChatRequest request = new LLMEngineChatRequest()
+		LanguageModelChatRequest request = new LanguageModelChatRequest()
 		request.model = 'claude-sonnet-4'
-		LLMEngineChatMessage msg = new LLMEngineChatMessage()
+		LanguageModelChatMessage msg = new LanguageModelChatMessage()
 		msg.role = 'user'
 		msg.content = 'Stream test'
 		request.messages = [msg]
-		LLMEngineStreamingResponseHandler handler = Mock()
+		LanguageModelStreamingResponseHandler handler = Mock()
 
 		when:
 		provider.streamChatCompletion(integration, request, handler, [:])
@@ -255,7 +255,7 @@ class CopilotProviderSpec extends Specification {
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LLMEngineEmbeddingRequest request = new LLMEngineEmbeddingRequest()
+		LanguageModelEmbeddingRequest request = new LanguageModelEmbeddingRequest()
 		request.model = 'text-embedding-3-small'
 		request.input = ['Hello world']
 
@@ -348,7 +348,7 @@ class CopilotProviderSpec extends Specification {
 		given:
 		AccountIntegration integration = new AccountIntegration(serviceToken: 'tok')
 		Map apiResponse = [data: []]
-		LLMEngineModel existing = new LLMEngineModel()
+		LanguageModel existing = new LanguageModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = true
 		existing.providerCode = 'github-copilot'
@@ -365,7 +365,7 @@ class CopilotProviderSpec extends Specification {
 		given:
 		AccountIntegration integration = new AccountIntegration(serviceToken: 'tok')
 		Map apiResponse = [data: [[id: 'gpt-4o', name: 'GPT-4o']]]
-		LLMEngineModel existing = new LLMEngineModel()
+		LanguageModel existing = new LanguageModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = false
 		existing.name = 'GPT-4o'
