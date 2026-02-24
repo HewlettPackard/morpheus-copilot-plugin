@@ -18,7 +18,7 @@ package com.morpheusdata.copilot
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
-import com.morpheusdata.core.providers.LanguageModelIntegrationProvider
+import com.morpheusdata.core.providers.LanguageModelProvider
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.Icon
 import com.morpheusdata.model.OptionType
@@ -28,7 +28,7 @@ import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 
 /**
- * LanguageModelIntegrationProvider implementation for GitHub Copilot.
+ * LanguageModelProvider implementation for GitHub Copilot.
  * GitHub Copilot exposes an OpenAI-compatible API that provides access
  * to multiple LLM providers (OpenAI, Anthropic, Google) through a single endpoint.
  * Supports chat completion, streaming chat, and embeddings.
@@ -36,7 +36,7 @@ import groovy.util.logging.Slf4j
  * @author Morpheus
  */
 @Slf4j
-class CopilotProvider implements LanguageModelIntegrationProvider {
+class CopilotProvider implements LanguageModelProvider {
 
 	Plugin plugin
 	MorpheusContext morpheusContext
@@ -94,7 +94,7 @@ class CopilotProvider implements LanguageModelIntegrationProvider {
 
 	@Override
 	List<OptionType> getIntegrationOptionTypes() {
-		List<OptionType> optionTypes = LanguageModelIntegrationProvider.defaultOptionTypes(PROVIDER_CODE)
+		List<OptionType> optionTypes = LanguageModelProvider.defaultOptionTypes(PROVIDER_CODE)
 		// Set default Copilot API URL
 		optionTypes.find { it.fieldName == 'serviceUrl' }?.setDefaultValue(DEFAULT_API_URL)
 		// Copilot uses a GitHub token – only API key field is relevant

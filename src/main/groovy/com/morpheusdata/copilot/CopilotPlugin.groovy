@@ -20,7 +20,7 @@ import groovy.util.logging.Slf4j
 
 /**
  * Plugin entrypoint for GitHub Copilot LLM Engine integration.
- * Registers the CopilotProvider which implements LanguageModelIntegrationProvider.
+ * Registers the CopilotProvider which implements LanguageModelProvider.
  *
  * @author Morpheus
  */
