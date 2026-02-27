@@ -15,14 +15,14 @@
  */
 package com.morpheusdata.copilot
 
-import com.morpheusdata.core.MorpheusAsyncServices
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
-import com.morpheusdata.core.integration.MorpheusLanguageModelService
+import com.morpheusdata.core.integration.MorpheusLlmModelService
+import com.morpheusdata.core.integration.MorpheusLlmService
 import com.morpheusdata.model.AccountIntegration
-import com.morpheusdata.model.languageModel.*
-import com.morpheusdata.response.LanguageModelStreamingResponseHandler
+import com.morpheusdata.model.llm.*
+import com.morpheusdata.response.LlmStreamingResponseHandler
 import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.core.Single
 import spock.lang.Specification
@@ -32,18 +32,18 @@ class CopilotProviderSpec extends Specification {
 	CopilotProvider provider
 	Plugin plugin
 	MorpheusContext morpheusContext
-	MorpheusAsyncServices asyncServices
-	MorpheusLanguageModelService modelService
+	MorpheusLlmService llmService
+	MorpheusLlmModelService modelService
 	CopilotApiService apiService
 
 	def setup() {
 		plugin = Mock(Plugin)
 		morpheusContext = Mock(MorpheusContext)
-		asyncServices = Mock(MorpheusAsyncServices)
-		modelService = Mock(MorpheusLanguageModelService)
+		llmService = Mock(MorpheusLlmService)
+		modelService = Mock(MorpheusLlmModelService)
 
-		morpheusContext.getAsync() >> asyncServices
-		asyncServices.getLanguageModel() >> modelService
+		morpheusContext.getLlm() >> llmService
+		llmService.getModel() >> modelService
 		modelService.list(_) >> Observable.empty()
 		modelService.bulkCreate(_) >> Single.just(true)
 		modelService.bulkSave(_) >> Single.just(true)
@@ -71,22 +71,16 @@ class CopilotProviderSpec extends Specification {
 		provider.getIcon().darkPath == 'copilot-white.svg'
 	}
 
-	def "provider returns LanguageModelIntegrationType"() {
-		when:
-		def type = provider.getLanguageModelIntegrationType()
-
-		then:
-		type.code == 'github-copilot'
-		type.name == 'GitHub Copilot'
-		type.chatSupported
-		type.streamingChatSupported
-		type.embeddingSupported
-		type.enabled
+	def "provider capability fields are set correctly"() {
+		expect:
+		provider.chatSupported
+		provider.streamingChatSupported
+		!provider.embeddingSupported
 	}
 
 	def "provider returns integration option types with copilot defaults"() {
 		when:
-		def opts = provider.getIntegrationOptionTypes()
+		def opts = provider.getOptionTypes()
 
 		then:
 		opts != null
@@ -99,73 +93,75 @@ class CopilotProviderSpec extends Specification {
 
 	// --- Verify ---
 
-	def "verify succeeds when API returns models"() {
+	def "validate succeeds when API returns models"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 
 		when:
-		def result = provider.verifyAccountIntegration(integration, [:])
+		def result = provider.validate(integration, [:])
 
 		then:
 		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: []]]
 		result.success
 	}
 
-	def "verify fails when token is missing"() {
+	def "validate fails when token is missing"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(serviceUrl: 'https://api.githubcopilot.com')
+		AccountIntegration accountIntegration = new AccountIntegration(serviceUrl: 'https://api.githubcopilot.com')
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 
 		when:
-		def result = provider.verifyAccountIntegration(integration, [:])
+		def result = provider.validate(integration, [:])
 
 		then:
 		!result.success
 		result.errors?.error?.contains('GitHub Token is required')
 	}
 
-	// --- Capabilities ---
+	// --- Models ---
 
-	def "getCapabilities returns chat and streaming and embedding support"() {
+	def "listModels refreshes from API when cache is empty"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 
 		when:
-		def result = provider.getCapabilities(integration, [:])
+		def result = provider.listModels(integration, [:])
 
 		then:
 		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: [[id: 'gpt-4o', name: 'GPT-4o']]]]
 		result.success
-		result.data.chatSupported
-		result.data.streamingChatSupported
-		result.data.embeddingSupported
+		result.data instanceof List
 	}
 
 	// --- Chat completion ---
 
 	def "chatCompletion succeeds with valid response"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LanguageModelChatRequest request = new LanguageModelChatRequest()
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
 		request.model = 'gpt-4o'
-		LanguageModelChatMessage msg = new LanguageModelChatMessage()
+		LlmChatMessage msg = new LlmChatMessage()
 		msg.role = 'user'
 		msg.content = 'Hello'
 		request.messages = [msg]
 
 		when:
-		def result = provider.chatCompletion(integration, request, [:])
+		def result = provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.chatCompletion('https://api.githubcopilot.com', 'gh-tok-123', _) >> [
+		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', _) >> [
 			success: true,
 			data   : [
 				id     : 'chatcmpl-abc',
@@ -186,38 +182,76 @@ class CopilotProviderSpec extends Specification {
 
 	def "chatCompletion defaults model to gpt-4o when not specified"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LanguageModelChatRequest request = new LanguageModelChatRequest()
-		LanguageModelChatMessage msg = new LanguageModelChatMessage()
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
+		LlmChatMessage msg = new LlmChatMessage()
 		msg.role = 'user'
 		msg.content = 'Test'
 		request.messages = [msg]
 
 		when:
-		provider.chatCompletion(integration, request, [:])
+		provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.chatCompletion(_, _, { Map body -> body.model == 'gpt-4o' }) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
+		1 * apiService.interact(_, _, '/chat/completions', { Map body -> body.model == 'gpt-4o' }) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
+	}
+
+	def "chatCompletion routes codex models to responses endpoint"() {
+		given:
+		AccountIntegration accountIntegration = new AccountIntegration(
+			serviceUrl: 'https://api.githubcopilot.com',
+			serviceToken: 'gh-tok-123'
+		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
+		request.model = 'gpt-5.1-codex'
+		request.maxOutputTokens = 2048
+		LlmChatMessage msg = new LlmChatMessage()
+		msg.role = 'user'
+		msg.content = 'Refactor this method'
+		request.messages = [msg]
+
+		when:
+		def result = provider.generateResponse(integration, request, [:])
+
+		then:
+		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/responses', { Map body ->
+			body.model == 'gpt-5.1-codex' && body.input instanceof List && body.max_output_tokens == 2048 && body.stream == false
+		}) >> [
+			success: true,
+			data   : [
+				id         : 'resp_123',
+				model      : 'gpt-5.1-codex',
+				status     : 'completed',
+				output_text: 'Done',
+				usage      : [input_tokens: 12, output_tokens: 8, total_tokens: 20]
+			]
+		]
+		result.success
+		result.data.message.content == 'Done'
+		result.data.tokenUsage.totalTokens == 20
 	}
 
 	def "chatCompletion handles API failure"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LanguageModelChatRequest request = new LanguageModelChatRequest()
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
 		request.model = 'gpt-4o'
 		request.messages = []
 
 		when:
-		def result = provider.chatCompletion(integration, request, [:])
+		def result = provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.chatCompletion(_, _, _) >> [success: false, msg: 'Rate limited']
+		1 * apiService.interact(_, _, '/chat/completions', _) >> [success: false, msg: 'Rate limited']
 		!result.success
 		result.errors?.error?.contains('Rate limited')
 	}
@@ -226,78 +260,107 @@ class CopilotProviderSpec extends Specification {
 
 	def "streamChatCompletion calls apiService with stream true"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LanguageModelChatRequest request = new LanguageModelChatRequest()
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
 		request.model = 'claude-sonnet-4'
-		LanguageModelChatMessage msg = new LanguageModelChatMessage()
+		LlmChatMessage msg = new LlmChatMessage()
 		msg.role = 'user'
 		msg.content = 'Stream test'
 		request.messages = [msg]
-		LanguageModelStreamingResponseHandler handler = Mock()
+		LlmStreamingResponseHandler handler = Mock()
 
 		when:
-		provider.streamChatCompletion(integration, request, handler, [:])
+		provider.streamResponse(integration, request, handler, [:])
 
 		then:
-		1 * apiService.streamChatCompletion('https://api.githubcopilot.com', 'gh-tok-123', { Map body ->
+		1 * apiService.streamInteract('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', { Map body ->
 			body.model == 'claude-sonnet-4' && body.stream == true
 		}, handler)
 	}
 
-	// --- Embeddings ---
-
-	def "generateEmbeddings returns parsed embedding response"() {
+	def "streamChatCompletion for codex models uses responses fallback"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(
+		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
-		LanguageModelEmbeddingRequest request = new LanguageModelEmbeddingRequest()
-		request.model = 'text-embedding-3-small'
-		request.input = ['Hello world']
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest()
+		request.model = 'gpt-5.1-codex'
+		LlmChatMessage msg = new LlmChatMessage()
+		msg.role = 'user'
+		msg.content = 'Generate code'
+		request.messages = [msg]
+		LlmStreamingResponseHandler handler = Mock()
 
 		when:
-		def result = provider.generateEmbeddings(integration, request, [:])
+		provider.streamResponse(integration, request, handler, [:])
 
 		then:
-		1 * apiService.createEmbeddings('https://api.githubcopilot.com', 'gh-tok-123', _) >> [
+		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/responses', { Map body ->
+			body.model == 'gpt-5.1-codex' && body.input instanceof List && body.stream == false
+		}) >> [
 			success: true,
 			data   : [
-				model: 'text-embedding-3-small',
-				data : [[embedding: [0.1, 0.2, 0.3]]],
-				usage: [prompt_tokens: 3, total_tokens: 3]
+				id         : 'resp_456',
+				model      : 'gpt-5.1-codex',
+				status     : 'completed',
+				output_text: 'Codex output'
 			]
 		]
-		result.success
-		result.data.embeddings.size() == 1
-		result.data.embeddings[0] == [0.1d, 0.2d, 0.3d]
-		result.data.tokenUsage.inputTokens == 3
+		0 * apiService.streamInteract(_, _, _, _, _)
+		1 * handler.onPartialResponse('Codex output')
+		1 * handler.onCompleteResponse({ LlmChatResponse response ->
+			response.message?.content == 'Codex output'
+		})
 	}
 
 	// --- Model building & categorization ---
 
 	def "buildModelsFromApiResponse parses models correctly"() {
 		given:
+		AccountIntegration accountIntegration = new AccountIntegration(id: 7L)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 		Map apiResponse = [
 			data: [
-				[id: 'gpt-4o', name: 'GPT-4o'],
-				[id: 'claude-sonnet-4', name: 'Claude Sonnet 4'],
-				[id: 'text-embedding-3-small', name: 'Text Embedding 3 Small'],
+				[
+					id                 : 'gpt-4o',
+					name               : 'GPT-4o',
+					supported_endpoints: ['/chat/completions'],
+					capabilities       : [supports: [streaming: true], limits: [max_output_tokens: 4096]]
+				],
+				[
+					id                 : 'claude-sonnet-4',
+					name               : 'Claude Sonnet 4',
+					supported_endpoints: ['/chat/completions'],
+					capabilities       : [supports: [streaming: true]]
+				],
+				[
+					id                 : 'text-embedding-3-small',
+					name               : 'Text Embedding 3 Small',
+					supported_endpoints: ['/v1/embeddings'],
+					capabilities       : [type: 'embedding']
+				],
 				[id: 'some-unknown-model', name: 'Unknown']
 			]
 		]
 
 		when:
-		def models = provider.buildModelsFromApiResponse(apiResponse)
+		def models = provider.buildModelsFromApiResponse(integration, apiResponse)
 
 		then:
 		models.size() == 3  // unknown model is filtered out
 		models*.code.contains('gpt-4o')
 		models*.code.contains('claude-sonnet-4')
 		models*.code.contains('text-embedding-3-small')
+		models.every { it.languageModelIntegration?.code == 'language-model-7' }
+		models.find { it.code == 'gpt-4o' }?.metadata?.interactionEndpoint == '/chat/completions'
+		models.find { it.code == 'gpt-4o' }?.maxOutputTokens == 4096L
+		models.find { it.code == 'text-embedding-3-small' }?.metadata?.interactionEndpoint == '/v1/embeddings'
 	}
 
 	def "categorizeModel returns correct types"() {
@@ -333,7 +396,8 @@ class CopilotProviderSpec extends Specification {
 
 	def "syncModels creates new models"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(serviceToken: 'tok')
+		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 		Map apiResponse = [data: [[id: 'gpt-4o', name: 'GPT-4o']]]
 
 		when:
@@ -341,14 +405,17 @@ class CopilotProviderSpec extends Specification {
 
 		then:
 		1 * modelService.list(_) >> Observable.empty()
-		1 * modelService.bulkCreate({ List models -> models.size() == 1 && models[0].code == 'gpt-4o' }) >> Single.just(true)
+		1 * modelService.bulkCreate({ List models ->
+			models.size() == 1 && models[0].code == 'gpt-4o' && models[0].languageModelIntegration?.code == 'language-model-123'
+		}) >> Single.just(true)
 	}
 
 	def "syncModels disables removed models"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(serviceToken: 'tok')
+		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 		Map apiResponse = [data: []]
-		LanguageModel existing = new LanguageModel()
+		LlmModel existing = new LlmModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = true
 		existing.providerCode = 'github-copilot'
@@ -363,9 +430,10 @@ class CopilotProviderSpec extends Specification {
 
 	def "syncModels re-enables reappearing models"() {
 		given:
-		AccountIntegration integration = new AccountIntegration(serviceToken: 'tok')
+		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
 		Map apiResponse = [data: [[id: 'gpt-4o', name: 'GPT-4o']]]
-		LanguageModel existing = new LanguageModel()
+		LlmModel existing = new LlmModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = false
 		existing.name = 'GPT-4o'
@@ -423,26 +491,6 @@ class CopilotProviderSpec extends Specification {
 		response.message == null
 	}
 
-	def "parseEmbeddingResponse parses multiple embeddings"() {
-		given:
-		Map data = [
-			model: 'text-embedding-3-small',
-			data : [
-				[embedding: [0.1, 0.2, 0.3]],
-				[embedding: [0.4, 0.5, 0.6]]
-			],
-			usage: [prompt_tokens: 8, total_tokens: 8]
-		]
-
-		when:
-		def response = provider.parseEmbeddingResponse(data, 'text-embedding-3-small')
-
-		then:
-		response.model == 'text-embedding-3-small'
-		response.embeddings.size() == 2
-		response.tokenUsage.inputTokens == 8
-	}
-
 	// --- Token resolution ---
 
 	def "resolveToken prefers credentialData.password"() {
@@ -471,5 +519,15 @@ class CopilotProviderSpec extends Specification {
 
 		expect:
 		provider.resolveToken(integration) == 'pwd-token'
+	}
+
+	private static LlmIntegration languageModelIntegration(AccountIntegration accountIntegration) {
+		LlmIntegration integration = new LlmIntegration()
+		integration.accountIntegration = accountIntegration
+		if(accountIntegration?.id) {
+			integration.id = accountIntegration.id
+			integration.code = "language-model-${accountIntegration.id}"
+		}
+		return integration
 	}
 }

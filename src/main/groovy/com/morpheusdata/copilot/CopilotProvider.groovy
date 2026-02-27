@@ -18,25 +18,25 @@ package com.morpheusdata.copilot
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
-import com.morpheusdata.core.providers.LanguageModelProvider
+import com.morpheusdata.core.providers.LlmProvider
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.Icon
 import com.morpheusdata.model.OptionType
-import com.morpheusdata.model.languageModel.*
-import com.morpheusdata.response.LanguageModelStreamingResponseHandler
+import com.morpheusdata.model.llm.*
+import com.morpheusdata.response.LlmStreamingResponseHandler
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 
 /**
- * LanguageModelProvider implementation for GitHub Copilot.
+ * LlmProvider implementation for GitHub Copilot.
  * GitHub Copilot exposes an OpenAI-compatible API that provides access
  * to multiple LLM providers (OpenAI, Anthropic, Google) through a single endpoint.
- * Supports chat completion, streaming chat, and embeddings.
+ * Supports response generation and streaming.
  *
  * @author Morpheus
  */
 @Slf4j
-class CopilotProvider implements LanguageModelProvider {
+class CopilotProvider implements LlmProvider {
 
 	Plugin plugin
 	MorpheusContext morpheusContext
@@ -46,7 +46,6 @@ class CopilotProvider implements LanguageModelProvider {
 	static final String PROVIDER_NAME = 'GitHub Copilot'
 	static final String DEFAULT_API_URL = 'https://api.githubcopilot.com'
 	static final String DEFAULT_CHAT_MODEL = 'gpt-4o'
-	static final String DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
 
 	CopilotProvider(Plugin plugin, MorpheusContext morpheusContext) {
 		this.plugin = plugin
@@ -80,44 +79,64 @@ class CopilotProvider implements LanguageModelProvider {
 	}
 
 	@Override
-	LanguageModelIntegrationType getLanguageModelIntegrationType() {
-		LanguageModelIntegrationType type = new LanguageModelIntegrationType()
-		type.code = PROVIDER_CODE
-		type.name = PROVIDER_NAME
-		type.providerService = PROVIDER_CODE
-		type.chatSupported = true
-		type.streamingChatSupported = true
-		type.embeddingSupported = true
-		type.enabled = true
-		return type
+	Boolean getChatSupported() {
+		return true
 	}
 
 	@Override
-	List<OptionType> getIntegrationOptionTypes() {
-		List<OptionType> optionTypes = LanguageModelProvider.defaultOptionTypes(PROVIDER_CODE)
+	Boolean getStreamingChatSupported() {
+		return true
+	}
+
+	@Override
+	Boolean getEmbeddingSupported() {
+		return false
+	}
+
+	@Override
+	List<OptionType> getOptionTypes() {
+		List<OptionType> optionTypes = []
+
 		// Set default Copilot API URL
-		optionTypes.find { it.fieldName == 'serviceUrl' }?.setDefaultValue(DEFAULT_API_URL)
-		// Copilot uses a GitHub token – only API key field is relevant
-		OptionType credentials = new OptionType();
-		credentials.setCode(PROVIDER_CODE + ".credential");
-		credentials.setName("Credentials");
-		credentials.setInputType(OptionType.InputType.CREDENTIAL);
-		credentials.setFieldName("type");
-		credentials.setFieldLabel("Credentials");
-		credentials.setFieldContext("credential");
-		credentials.setRequired(true);
-		credentials.setDisplayOrder(1);
-		credentials.setDefaultValue("local");
-		credentials.setOptionSource("credentials");
-		credentials.setConfig("{\"credentialTypes\":[\"api-key\"]}");
+		OptionType serviceUrl = new OptionType(
+			code: "${PROVIDER_CODE}.serviceUrl",
+			name: "Service URL",
+			fieldName: "serviceUrl",
+			fieldLabel: "API Endpoint",
+			fieldContext: "domain",
+			inputType: OptionType.InputType.TEXT,
+			displayOrder: 0,
+			required: true,
+			defaultValue: DEFAULT_API_URL
+		)
+		optionTypes.add(serviceUrl);
+
+		// Copilot uses a GitHub token - only API key field is relevant
+		OptionType credentials = new OptionType(
+			code: "${PROVIDER_CODE}.credential",
+			name: "Credentials",
+			inputType: OptionType.InputType.CREDENTIAL,
+			fieldName: "type",
+			fieldLabel: "Credentials",
+			fieldContext: "credential",
+			required: true,
+			displayOrder: 1,
+			defaultValue: "local",
+			optionSource: "credentials",
+			config: '{"credentialTypes":["api-key"]}'
+		)
 		optionTypes.add(credentials);
 
 		return optionTypes
 	}
 
 	@Override
-	ServiceResponse verifyAccountIntegration(AccountIntegration accountIntegration, Map opts) {
+	ServiceResponse validate(LlmIntegration llmIntegration, Map opts) {
 		try {
+			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+			if(!accountIntegration) {
+				return ServiceResponse.error('Account integration is required for Copilot integration')
+			}
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
 			if (!token) {
@@ -125,7 +144,7 @@ class CopilotProvider implements LanguageModelProvider {
 			}
 			def result = apiService.listModels(baseUrl, token)
 			if (result.success) {
-				return ServiceResponse.success(accountIntegration)
+				return ServiceResponse.success(llmIntegration)
 			} else {
 				return ServiceResponse.error(result.msg ?: 'Failed to verify GitHub Copilot connection')
 			}
@@ -136,7 +155,12 @@ class CopilotProvider implements LanguageModelProvider {
 	}
 
 	@Override
-	void refresh(AccountIntegration accountIntegration) {
+	void refresh(LlmIntegration llmIntegration) {
+		AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+		if(!accountIntegration) {
+			log.warn("Cannot refresh Copilot integration – account integration is missing")
+			return
+		}
 		log.debug("Refreshing GitHub Copilot integration: ${accountIntegration.name}")
 		try {
 			String token = resolveToken(accountIntegration)
@@ -147,7 +171,7 @@ class CopilotProvider implements LanguageModelProvider {
 			}
 			def result = apiService.listModels(baseUrl, token)
 			if (result.success && result.data) {
-				syncModels(accountIntegration, result.data)
+				syncModels(llmIntegration, result.data)
 			} else {
 				log.warn("Failed to refresh models from Copilot: ${result.msg}")
 			}
@@ -157,64 +181,45 @@ class CopilotProvider implements LanguageModelProvider {
 	}
 
 	@Override
-	ServiceResponse<LanguageModelCapabilities> getCapabilities(AccountIntegration accountIntegration, Map opts) {
+	ServiceResponse<List<LlmModel>> listModels(LlmIntegration llmIntegration, Map opts) {
 		try {
-			LanguageModelCapabilities capabilities = new LanguageModelCapabilities()
-			capabilities.chatSupported = true
-			capabilities.streamingChatSupported = true
-			capabilities.embeddingSupported = true
-
-			List<LanguageModel> models = loadPersistedModels(accountIntegration)
+			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+			if(!accountIntegration) {
+				return ServiceResponse.error('Account integration is required for Copilot integration')
+			}
+			List<LlmModel> models = loadPersistedModels(llmIntegration)
 			if (!models) {
 				String token = resolveToken(accountIntegration)
 				String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
 				def modelsResult = apiService.listModels(baseUrl, token)
 				if (modelsResult.success && modelsResult.data) {
-					syncModels(accountIntegration, modelsResult.data)
-					models = loadPersistedModels(accountIntegration)
+					syncModels(llmIntegration, modelsResult.data)
+					models = loadPersistedModels(llmIntegration)
 				}
 			}
-			capabilities.models = models ?: []
-
-			return ServiceResponse.success(capabilities)
+			return ServiceResponse.success(models ?: [])
 		} catch (Exception e) {
-			log.error("Error fetching Copilot capabilities: ${e.message}", e)
-			return ServiceResponse.error("Failed to fetch capabilities: ${e.message}")
+			log.error("Error fetching Copilot models: ${e.message}", e)
+			return ServiceResponse.error("Failed to fetch models: ${e.message}")
 		}
 	}
 
 	@Override
-	ServiceResponse<LanguageModelChatResponse> chatCompletion(AccountIntegration accountIntegration, LanguageModelChatRequest request, Map opts) {
+	ServiceResponse<LlmChatResponse> generateResponse(LlmIntegration llmIntegration, LlmChatRequest request, Map opts) {
 		try {
+			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+			if(!accountIntegration) {
+				return ServiceResponse.error('Account integration is required for Copilot integration')
+			}
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
 			String model = request.model ?: DEFAULT_CHAT_MODEL
-
-			def apiMessages = request.messages?.collect { msg ->
-				[role: msg.role ?: 'user', content: msg.content]
-			} ?: []
-
-			Map requestBody = [
-				model   : model,
-				messages: apiMessages,
-				stream  : false
-			]
-			if (request.temperature != null) {
-				requestBody.temperature = request.temperature
-			}
-			if (request.topP != null) {
-				requestBody.top_p = request.topP
-			}
-			if (request.maxOutputTokens != null) {
-				requestBody.max_tokens = request.maxOutputTokens
-			}
-			if (request.stopSequences) {
-				requestBody.stop = request.stopSequences
-			}
-
-			def result = apiService.chatCompletion(baseUrl, token, requestBody)
+			LlmModel persistedModel = loadPersistedModel(llmIntegration, model)
+			String interactionEndpoint = resolveInteractionEndpoint(model, persistedModel)
+			Map requestBody = buildInteractionRequestBody(request, model, interactionEndpoint, false)
+			def result = apiService.interact(baseUrl, token, interactionEndpoint, requestBody)
 			if (result.success && result.data) {
-				LanguageModelChatResponse response = parseChatResponse(result.data)
+				LlmChatResponse response = isResponsesEndpoint(interactionEndpoint) ? parseResponsesChatResponse(result.data) : parseChatResponse(result.data)
 				return ServiceResponse.success(response)
 			} else {
 				return ServiceResponse.error(result.msg ?: 'Chat completion failed')
@@ -226,60 +231,38 @@ class CopilotProvider implements LanguageModelProvider {
 	}
 
 	@Override
-	void streamChatCompletion(AccountIntegration accountIntegration, LanguageModelChatRequest request, LanguageModelStreamingResponseHandler handler, Map opts) {
+	void streamResponse(LlmIntegration llmIntegration, LlmChatRequest request, LlmStreamingResponseHandler handler, Map opts) {
 		try {
+			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+			if(!accountIntegration) {
+				handler?.onError(new IllegalArgumentException('Account integration is required for Copilot integration'))
+				return
+			}
 			String token = resolveToken(accountIntegration)
 			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
 			String model = request.model ?: DEFAULT_CHAT_MODEL
+			LlmModel persistedModel = loadPersistedModel(llmIntegration, model)
+			String streamingEndpoint = resolveStreamingInteractionEndpoint(model, persistedModel)
 
-			def apiMessages = request.messages?.collect { msg ->
-				[role: msg.role ?: 'user', content: msg.content]
-			} ?: []
-
-			Map requestBody = [
-				model   : model,
-				messages: apiMessages,
-				stream  : true
-			]
-			if (request.temperature != null) {
-				requestBody.temperature = request.temperature
-			}
-			if (request.topP != null) {
-				requestBody.top_p = request.topP
-			}
-			if (request.maxOutputTokens != null) {
-				requestBody.max_tokens = request.maxOutputTokens
+			if(!streamingEndpoint) {
+				ServiceResponse<LlmChatResponse> response = generateResponse(llmIntegration, request, opts)
+				if(response?.success && response?.data) {
+					String content = response.data.message?.content
+					if(content) {
+						handler?.onPartialResponse(content)
+					}
+					handler?.onCompleteResponse(response.data)
+				} else {
+					handler?.onError(new RuntimeException(response?.errors?.error ?: 'Chat completion failed'))
+				}
+				return
 			}
 
-			apiService.streamChatCompletion(baseUrl, token, requestBody, handler)
+			Map requestBody = buildInteractionRequestBody(request, model, streamingEndpoint, true)
+			apiService.streamInteract(baseUrl, token, streamingEndpoint, requestBody, handler)
 		} catch (Exception e) {
 			log.error("Error during Copilot streaming chat: ${e.message}", e)
 			handler?.onError(e)
-		}
-	}
-
-	@Override
-	ServiceResponse<LanguageModelEmbeddingResponse> generateEmbeddings(AccountIntegration accountIntegration, LanguageModelEmbeddingRequest request, Map opts) {
-		try {
-			String token = resolveToken(accountIntegration)
-			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
-			String model = request.model ?: DEFAULT_EMBEDDING_MODEL
-
-			Map requestBody = [
-				model: model,
-				input: request.input
-			]
-
-			def result = apiService.createEmbeddings(baseUrl, token, requestBody)
-			if (result.success && result.data) {
-				LanguageModelEmbeddingResponse response = parseEmbeddingResponse(result.data, model)
-				return ServiceResponse.success(response)
-			} else {
-				return ServiceResponse.error(result.msg ?: 'Embedding generation failed')
-			}
-		} catch (Exception e) {
-			log.error("Error generating Copilot embeddings: ${e.message}", e)
-			return ServiceResponse.error("Embedding generation failed: ${e.message}")
 		}
 	}
 
@@ -289,16 +272,16 @@ class CopilotProvider implements LanguageModelProvider {
 	 * Sync persisted models with the latest API response.
 	 * New models are created, removed models are disabled, reappearing models are re-enabled.
 	 */
-	protected void syncModels(AccountIntegration accountIntegration, Map apiResponse) {
-		List<LanguageModel> freshModels = buildModelsFromApiResponse(apiResponse)
+	protected void syncModels(LlmIntegration llmIntegration, Map apiResponse) {
+		List<LlmModel> freshModels = buildModelsFromApiResponse(llmIntegration, apiResponse)
 		Set<String> freshCodes = freshModels.collect { it.code } as Set
 
-		List<LanguageModel> existingModels = loadPersistedModels(accountIntegration)
-		Map<String, LanguageModel> existingByCode = existingModels.collectEntries { [(it.code): it] }
+		List<LlmModel> existingModels = loadPersistedModels(llmIntegration)
+		Map<String, LlmModel> existingByCode = existingModels.collectEntries { [(it.code): it] }
 
-		def modelService = morpheusContext.async.getLanguageModel()
-		List<LanguageModel> toSave = []
-		List<LanguageModel> toCreate = []
+		def modelService = morpheusContext.llm.model
+		List<LlmModel> toSave = []
+		List<LlmModel> toCreate = []
 
 		// Disable models that no longer appear in the API
 		existingByCode.each { code, model ->
@@ -311,9 +294,13 @@ class CopilotProvider implements LanguageModelProvider {
 
 		// Add new models, re-enable ones that reappear
 		freshModels.each { freshModel ->
-			LanguageModel existing = existingByCode[freshModel.code]
+			LlmModel existing = existingByCode[freshModel.code]
 			if (existing) {
 				boolean changed = false
+				if (llmIntegration?.id && existing.llmIntegration?.id != llmIntegration.id) {
+					existing.llmIntegration = llmIntegration
+					changed = true
+				}
 				if (!existing.enabled) {
 					log.info("Re-enabling Copilot model: ${freshModel.code}")
 					existing.enabled = true
@@ -329,6 +316,17 @@ class CopilotProvider implements LanguageModelProvider {
 				}
 				if (existing.modelType != freshModel.modelType) {
 					existing.modelType = freshModel.modelType
+					changed = true
+				}
+				if (existing.maxOutputTokens != freshModel.maxOutputTokens) {
+					existing.maxOutputTokens = freshModel.maxOutputTokens
+					changed = true
+				}
+				Map existingMetadata = existing.metadata ?: [:]
+				Map freshMetadata = freshModel.metadata ?: [:]
+				if (existingMetadata != freshMetadata) {
+					existing.metadata = freshMetadata
+					existing.configMap = freshMetadata
 					changed = true
 				}
 				if (changed) {
@@ -351,11 +349,16 @@ class CopilotProvider implements LanguageModelProvider {
 	/**
 	 * Load persisted models for this integration from the DataService.
 	 */
-	protected List<LanguageModel> loadPersistedModels(AccountIntegration accountIntegration) {
+	protected List<LlmModel> loadPersistedModels(LlmIntegration llmIntegration) {
 		try {
-			def modelService = morpheusContext.async.getLanguageModel()
+			if(!llmIntegration?.id) {
+				return []
+			}
+			def modelService = morpheusContext.llm.model
+			DataQuery query = new DataQuery().withFilter('providerCode', PROVIDER_CODE)
+			query.withFilter('llmIntegration.id', llmIntegration.id)
 			return modelService.list(
-				new DataQuery().withFilter('providerCode', PROVIDER_CODE)
+				query
 			).toList().blockingGet() ?: []
 		} catch (Exception e) {
 			log.debug("Could not load persisted models: ${e.message}")
@@ -371,23 +374,39 @@ class CopilotProvider implements LanguageModelProvider {
 	}
 
 	/**
-	 * Build LanguageModel list from the Copilot /models API response.
+	 * Build LlmModel list from the Copilot /models API response.
 	 * Copilot returns models from multiple providers (OpenAI, Anthropic, Google).
 	 */
-	protected List<LanguageModel> buildModelsFromApiResponse(Map apiResponse) {
-		List<LanguageModel> models = []
+	protected List<LlmModel> buildModelsFromApiResponse(LlmIntegration llmIntegration, Map apiResponse) {
+		List<LlmModel> models = []
 		def modelData = apiResponse?.data
 		if (modelData instanceof List) {
 			modelData.each { entry ->
 				String modelId = entry.id?.toString()
 				if (modelId && isChatOrEmbeddingModel(modelId)) {
-					LanguageModel model = new LanguageModel()
+					String modelType = categorizeModel(modelId)
+					Map<String, Object> capabilities = extractCapabilities(entry)
+					List<String> supportedEndpoints = normalizeSupportedEndpoints(entry?.supported_endpoints, modelId, modelType)
+					String interactionEndpoint = selectInteractionEndpoint(supportedEndpoints, modelId, modelType)
+					String streamingInteractionEndpoint = selectStreamingInteractionEndpoint(capabilities, supportedEndpoints, interactionEndpoint, modelType)
+					Map<String, Object> metadata = LlmModelMetadata.buildMetadata(capabilities, supportedEndpoints, interactionEndpoint, streamingInteractionEndpoint)
+
+					LlmModel model = new LlmModel()
 					model.code = modelId
 					model.externalId = modelId
 					model.name = entry.name?.toString() ?: formatModelName(modelId)
 					model.providerCode = PROVIDER_CODE
-					model.modelType = categorizeModel(modelId)
+					model.modelType = modelType
 					model.contextWindow = estimateContextWindow(modelId)
+					Long maxOutputTokens = extractMaxOutputTokens(capabilities)
+					if(maxOutputTokens != null) {
+						model.maxOutputTokens = maxOutputTokens
+					}
+					if(metadata) {
+						model.metadata = metadata
+						model.configMap = metadata
+					}
+					model.llmIntegration = llmIntegration
 					model.enabled = true
 					models.add(model)
 				}
@@ -398,6 +417,16 @@ class CopilotProvider implements LanguageModelProvider {
 			typeCompare != 0 ? typeCompare : (a.name ?: '').compareTo(b.name ?: '')
 		}
 		return models
+	}
+
+	protected LlmIntegration buildLlmIntegrationRef(LlmIntegration llmIntegration) {
+		if(!llmIntegration?.id) {
+			return null
+		}
+		LlmIntegration integrationRef = new LlmIntegration()
+		integrationRef.id = llmIntegration.id
+		integrationRef.code = llmIntegration.code
+		return integrationRef
 	}
 
 	/**
@@ -465,11 +494,251 @@ class CopilotProvider implements LanguageModelProvider {
 		return 4096L
 	}
 
+	protected LlmModel loadPersistedModel(LlmIntegration llmIntegration, String modelCode) {
+		if(!modelCode || !llmIntegration?.id) {
+			return null
+		}
+		try {
+			def modelService = morpheusContext.llm.model
+			DataQuery query = new DataQuery()
+				.withFilter('providerCode', PROVIDER_CODE)
+				.withFilter('code', modelCode)
+				.withFilter('llmIntegration.id', llmIntegration.id)
+			return modelService.list(query).toList().blockingGet()?.find { it.code == modelCode }
+		} catch (Exception ex) {
+			log.debug("Could not load persisted model ${modelCode}: ${ex.message}")
+			return null
+		}
+	}
+
+	protected String resolveInteractionEndpoint(String modelId, LlmModel persistedModel) {
+		String endpoint = LlmModelMetadata.getInteractionEndpoint(persistedModel)
+		if(endpoint) {
+			return endpoint
+		}
+		List<String> supportedEndpoints = LlmModelMetadata.getSupportedEndpoints(persistedModel)
+		String modelType = persistedModel?.modelType ?: categorizeModel(modelId)
+		if(!supportedEndpoints) {
+			supportedEndpoints = defaultSupportedEndpoints(modelId, modelType)
+		}
+		return selectInteractionEndpoint(supportedEndpoints, modelId, modelType)
+	}
+
+	protected String resolveStreamingInteractionEndpoint(String modelId, LlmModel persistedModel) {
+		String endpoint = LlmModelMetadata.getStreamingInteractionEndpoint(persistedModel)
+		if(endpoint) {
+			return endpoint
+		}
+		String modelType = persistedModel?.modelType ?: categorizeModel(modelId)
+		List<String> supportedEndpoints = LlmModelMetadata.getSupportedEndpoints(persistedModel)
+		if(!supportedEndpoints) {
+			supportedEndpoints = defaultSupportedEndpoints(modelId, modelType)
+		}
+		String interactionEndpoint = resolveInteractionEndpoint(modelId, persistedModel)
+		Boolean streamingSupported = LlmModelMetadata.getStreamingSupported(persistedModel)
+		return selectStreamingInteractionEndpoint(LlmModelMetadata.getCapabilities(persistedModel), supportedEndpoints, interactionEndpoint, modelType, streamingSupported)
+	}
+
+	protected Map buildInteractionRequestBody(LlmChatRequest request, String model, String endpointPath, Boolean stream) {
+		def apiMessages = request.messages?.collect { msg ->
+			[role: msg.role ?: 'user', content: msg.content]
+		} ?: []
+		Map requestBody
+		if(isResponsesEndpoint(endpointPath)) {
+			requestBody = [
+				model: model,
+				input: apiMessages
+			]
+			if (request.temperature != null) {
+				requestBody.temperature = request.temperature
+			}
+			if (request.topP != null) {
+				requestBody.top_p = request.topP
+			}
+			if (request.maxOutputTokens != null) {
+				requestBody.max_output_tokens = request.maxOutputTokens
+			}
+			if (request.stopSequences) {
+				requestBody.stop = request.stopSequences
+			}
+		} else {
+			requestBody = [
+				model   : model,
+				messages: apiMessages
+			]
+			if (request.temperature != null) {
+				requestBody.temperature = request.temperature
+			}
+			if (request.topP != null) {
+				requestBody.top_p = request.topP
+			}
+			if (request.maxOutputTokens != null) {
+				requestBody.max_tokens = request.maxOutputTokens
+			}
+			if (request.stopSequences) {
+				requestBody.stop = request.stopSequences
+			}
+		}
+		if(stream != null) {
+			requestBody.stream = stream
+		}
+		return requestBody
+	}
+
+	protected Map<String, Object> extractCapabilities(Map entry) {
+		def capabilities = entry?.capabilities
+		if(capabilities instanceof Map) {
+			return new LinkedHashMap<>(capabilities as Map<String, Object>)
+		}
+		return [:]
+	}
+
+	protected Long extractMaxOutputTokens(Map<String, Object> capabilities) {
+		def limits = capabilities?.limits
+		if(!(limits instanceof Map)) {
+			return null
+		}
+		def value = limits.max_output_tokens ?: limits.max_non_streaming_output_tokens
+		if(value instanceof Number) {
+			return (value as Number).longValue()
+		}
+		if(value != null) {
+			try {
+				return value.toString().toLong()
+			} catch(Exception ignored) {
+				return null
+			}
+		}
+		return null
+	}
+
+	protected List<String> normalizeSupportedEndpoints(def supportedEndpoints, String modelId, String modelType) {
+		List<String> endpoints = []
+		if(supportedEndpoints instanceof List) {
+			supportedEndpoints.each { endpoint ->
+				if(endpoint) {
+					endpoints << endpoint.toString()
+				}
+			}
+		}
+		if(!endpoints) {
+			endpoints = defaultSupportedEndpoints(modelId, modelType)
+		}
+		return endpoints.unique()
+	}
+
+	protected List<String> defaultSupportedEndpoints(String modelId, String modelType) {
+		if(modelType == 'embedding') {
+			return [CopilotApiService.EMBEDDINGS_PATH]
+		}
+		if(modelId?.toLowerCase()?.contains('codex')) {
+			return [CopilotApiService.RESPONSES_PATH]
+		}
+		return [CopilotApiService.CHAT_COMPLETIONS_PATH]
+	}
+
+	protected String selectInteractionEndpoint(List<String> supportedEndpoints, String modelId, String modelType) {
+		if(modelType == 'embedding') {
+			return supportedEndpoints.find { it?.toLowerCase()?.contains('embedding') } ?: CopilotApiService.EMBEDDINGS_PATH
+		}
+		String responsesPath = supportedEndpoints.find { isResponsesEndpoint(it) }
+		String chatPath = supportedEndpoints.find { isChatCompletionsEndpoint(it) }
+		if(modelId?.toLowerCase()?.contains('codex') && responsesPath) {
+			return responsesPath
+		}
+		if(chatPath) {
+			return chatPath
+		}
+		if(responsesPath) {
+			return responsesPath
+		}
+		return supportedEndpoints ? supportedEndpoints[0] : CopilotApiService.CHAT_COMPLETIONS_PATH
+	}
+
+	protected String selectStreamingInteractionEndpoint(Map<String, Object> capabilities, List<String> supportedEndpoints, String interactionEndpoint, String modelType, Boolean streamingSupported = null) {
+		if(modelType == 'embedding') {
+			return null
+		}
+		if(streamingSupported == null) {
+			streamingSupported = capabilities?.supports instanceof Map ? capabilities.supports.streaming as Boolean : null
+		}
+		if(streamingSupported == Boolean.FALSE) {
+			return null
+		}
+		if(interactionEndpoint && isChatCompletionsEndpoint(interactionEndpoint)) {
+			return interactionEndpoint
+		}
+		String streamingCandidate = supportedEndpoints?.find { isChatCompletionsEndpoint(it) }
+		if(streamingCandidate) {
+			return streamingCandidate
+		}
+		return null
+	}
+
+	protected boolean isResponsesEndpoint(String endpointPath) {
+		return endpointPath?.toLowerCase()?.contains('/responses')
+	}
+
+	protected boolean isChatCompletionsEndpoint(String endpointPath) {
+		return endpointPath?.toLowerCase()?.contains('/chat/completions')
+	}
+
+	protected LlmChatResponse parseResponsesChatResponse(Map data) {
+		LlmChatResponse response = new LlmChatResponse()
+		response.id = data.id?.toString()
+		response.model = data.model?.toString()
+		String status = data.status?.toString()
+		if(status) {
+			response.finishReason = status == 'completed' ? 'stop' : status
+		}
+
+		String responseText = extractResponsesText(data)
+		if(responseText != null) {
+			LlmChatMessage msg = new LlmChatMessage()
+			msg.role = 'assistant'
+			msg.content = responseText
+			response.message = msg
+		}
+
+		def usage = data.usage
+		if (usage) {
+			LlmTokenUsage tokenUsage = new LlmTokenUsage()
+			tokenUsage.inputTokens = usage.input_tokens as Integer
+			tokenUsage.outputTokens = usage.output_tokens as Integer
+			tokenUsage.totalTokens = usage.total_tokens as Integer
+			response.tokenUsage = tokenUsage
+		}
+
+		return response
+	}
+
+	protected String extractResponsesText(Map data) {
+		if(data.output_text != null) {
+			return data.output_text.toString()
+		}
+		StringBuilder textBuilder = new StringBuilder()
+		def output = data.output
+		if(output instanceof List) {
+			output.each { outputItem ->
+				def contentItems = outputItem?.content
+				if(contentItems instanceof List) {
+					contentItems.each { contentItem ->
+						String textValue = contentItem?.text?.toString() ?: contentItem?.output_text?.toString()
+						if(textValue) {
+							textBuilder.append(textValue)
+						}
+					}
+				}
+			}
+		}
+		return textBuilder.length() > 0 ? textBuilder.toString() : null
+	}
+
 	/**
-	 * Parse OpenAI-compatible chat completion response into LanguageModelChatResponse.
+	 * Parse OpenAI-compatible chat completion response into LlmChatResponse.
 	 */
-	protected LanguageModelChatResponse parseChatResponse(Map data) {
-		LanguageModelChatResponse response = new LanguageModelChatResponse()
+	protected LlmChatResponse parseChatResponse(Map data) {
+		LlmChatResponse response = new LlmChatResponse()
 		response.id = data.id?.toString()
 		response.model = data.model?.toString()
 
@@ -479,7 +748,7 @@ class CopilotProvider implements LanguageModelProvider {
 			response.finishReason = choice.finish_reason?.toString()
 			def messageData = choice.message
 			if (messageData) {
-				LanguageModelChatMessage msg = new LanguageModelChatMessage()
+				LlmChatMessage msg = new LlmChatMessage()
 				msg.role = messageData.role?.toString() ?: 'assistant'
 				msg.content = messageData.content?.toString()
 				response.message = msg
@@ -488,7 +757,7 @@ class CopilotProvider implements LanguageModelProvider {
 
 		def usage = data.usage
 		if (usage) {
-			LanguageModelTokenUsage tokenUsage = new LanguageModelTokenUsage()
+			LlmTokenUsage tokenUsage = new LlmTokenUsage()
 			tokenUsage.inputTokens = usage.prompt_tokens as Integer
 			tokenUsage.outputTokens = usage.completion_tokens as Integer
 			tokenUsage.totalTokens = usage.total_tokens as Integer
@@ -498,32 +767,4 @@ class CopilotProvider implements LanguageModelProvider {
 		return response
 	}
 
-	/**
-	 * Parse OpenAI-compatible embeddings response into LanguageModelEmbeddingResponse.
-	 */
-	protected LanguageModelEmbeddingResponse parseEmbeddingResponse(Map data, String model) {
-		LanguageModelEmbeddingResponse response = new LanguageModelEmbeddingResponse()
-		response.model = data.model?.toString() ?: model
-
-		def embeddingData = data.data
-		if (embeddingData instanceof List) {
-			List<List<Double>> embeddings = []
-			embeddingData.each { entry ->
-				if (entry.embedding instanceof List) {
-					embeddings.add(entry.embedding.collect { it as Double })
-				}
-			}
-			response.embeddings = embeddings
-		}
-
-		def usage = data.usage
-		if (usage) {
-			LanguageModelTokenUsage tokenUsage = new LanguageModelTokenUsage()
-			tokenUsage.inputTokens = usage.prompt_tokens as Integer
-			tokenUsage.totalTokens = usage.total_tokens as Integer
-			response.tokenUsage = tokenUsage
-		}
-
-		return response
-	}
 }

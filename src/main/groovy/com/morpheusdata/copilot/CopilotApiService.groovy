@@ -15,10 +15,10 @@
  */
 package com.morpheusdata.copilot
 
-import com.morpheusdata.model.languageModel.LanguageModelChatMessage
-import com.morpheusdata.model.languageModel.LanguageModelChatResponse
-import com.morpheusdata.model.languageModel.LanguageModelTokenUsage
-import com.morpheusdata.response.LanguageModelStreamingResponseHandler
+import com.morpheusdata.model.llm.LlmChatMessage
+import com.morpheusdata.model.llm.LlmChatResponse
+import com.morpheusdata.model.llm.LlmTokenUsage
+import com.morpheusdata.response.LlmStreamingResponseHandler
 import groovy.json.JsonBuilder
 import groovy.json.JsonSlurper
 import groovy.util.logging.Slf4j
@@ -34,8 +34,12 @@ import groovy.util.logging.Slf4j
 class CopilotApiService {
 
 	static final String CHAT_COMPLETIONS_PATH = '/chat/completions'
+	static final String RESPONSES_PATH = '/responses'
 	static final String MODELS_PATH = '/models'
 	static final String EMBEDDINGS_PATH = '/v1/embeddings'
+	static final String DEFAULT_INTERACTION_PATH = CHAT_COMPLETIONS_PATH
+	static final String COPILOT_INTEGRATION_HEADER = 'Copilot-Integration-Id'
+	static final String COPILOT_INTEGRATION_ID = 'copilot-developer-cli'
 
 	/**
 	 * List available models from GitHub Copilot.
@@ -45,26 +49,36 @@ class CopilotApiService {
 	}
 
 	/**
-	 * Execute a non-streaming chat completion request.
+	 * Execute a non-streaming interaction request against a model endpoint.
 	 */
-	Map chatCompletion(String baseUrl, String token, Map requestBody) {
-		return executePost("${baseUrl}${CHAT_COMPLETIONS_PATH}", token, requestBody)
+	Map interact(String baseUrl, String token, String endpointPath, Map requestBody) {
+		String path = endpointPath ?: DEFAULT_INTERACTION_PATH
+		return executePost("${baseUrl}${path}", token, requestBody)
 	}
 
 	/**
-	 * Execute a streaming chat completion request via SSE.
+	 * Execute a non-streaming responses API request.
 	 */
-	void streamChatCompletion(String baseUrl, String token, Map requestBody, LanguageModelStreamingResponseHandler handler) {
+	Map responsesCompletion(String baseUrl, String token, Map requestBody) {
+		return interact(baseUrl, token, RESPONSES_PATH, requestBody)
+	}
+
+	/**
+	 * Execute a streaming interaction request via SSE.
+	 */
+	void streamInteract(String baseUrl, String token, String endpointPath, Map requestBody, LlmStreamingResponseHandler handler) {
 		HttpURLConnection connection = null
 		try {
 			requestBody.stream = true
 			String jsonBody = new JsonBuilder(requestBody).toString()
+			String path = endpointPath ?: DEFAULT_INTERACTION_PATH
 
-			URL url = new URL("${baseUrl}${CHAT_COMPLETIONS_PATH}")
+			URL url = new URL("${baseUrl}${path}")
 			connection = (HttpURLConnection) url.openConnection()
 			connection.requestMethod = 'POST'
 			connection.setRequestProperty('Content-Type', 'application/json')
 			connection.setRequestProperty('Authorization', "Bearer ${token}")
+			connection.setRequestProperty(COPILOT_INTEGRATION_HEADER, COPILOT_INTEGRATION_ID)
 			connection.setRequestProperty('Accept', 'text/event-stream')
 			connection.doOutput = true
 			connection.connectTimeout = 30000
@@ -115,10 +129,10 @@ class CopilotApiService {
 				}
 			}
 
-			LanguageModelChatResponse response = new LanguageModelChatResponse()
+			LlmChatResponse response = new LlmChatResponse()
 			response.model = responseModel
 			response.finishReason = finishReason
-			LanguageModelChatMessage msg = new LanguageModelChatMessage()
+			LlmChatMessage msg = new LlmChatMessage()
 			msg.role = 'assistant'
 			msg.content = fullContent.toString()
 			response.message = msg
@@ -133,13 +147,6 @@ class CopilotApiService {
 	}
 
 	/**
-	 * Create embeddings via Copilot API.
-	 */
-	Map createEmbeddings(String baseUrl, String token, Map requestBody) {
-		return executePost("${baseUrl}${EMBEDDINGS_PATH}", token, requestBody)
-	}
-
-	/**
 	 * Execute a GET request against the Copilot API.
 	 */
 	protected Map executeGet(String urlString, String token) {
@@ -149,6 +156,7 @@ class CopilotApiService {
 			connection = (HttpURLConnection) url.openConnection()
 			connection.requestMethod = 'GET'
 			connection.setRequestProperty('Authorization', "Bearer ${token}")
+			connection.setRequestProperty(COPILOT_INTEGRATION_HEADER, COPILOT_INTEGRATION_ID)
 			connection.setRequestProperty('Accept', 'application/json')
 			connection.connectTimeout = 30000
 			connection.readTimeout = 30000
@@ -184,6 +192,7 @@ class CopilotApiService {
 			connection.requestMethod = 'POST'
 			connection.setRequestProperty('Content-Type', 'application/json')
 			connection.setRequestProperty('Authorization', "Bearer ${token}")
+			connection.setRequestProperty(COPILOT_INTEGRATION_HEADER, COPILOT_INTEGRATION_ID)
 			connection.setRequestProperty('Accept', 'application/json')
 			connection.doOutput = true
 			connection.connectTimeout = 30000

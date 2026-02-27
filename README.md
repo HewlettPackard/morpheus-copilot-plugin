@@ -15,7 +15,7 @@ The provider uses GitHub Copilot's OpenAI-compatible API to support:
 
 ## What this plugin does
 
-- Registers a Morpheus `LanguageModelProvider` named **GitHub Copilot**
+- Registers a Morpheus `LlmProvider` named **GitHub Copilot**
 - Verifies connectivity using your GitHub token
 - Syncs available models from Copilot and persists them in Morpheus
 - Supports chat and embedding model families exposed by Copilot (for example GPT, Claude, and Gemini families, plus text-embedding models)
