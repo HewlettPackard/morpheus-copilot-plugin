@@ -15,6 +15,8 @@
  */
 package com.morpheusdata.copilot.sync
 
+import com.morpheusdata.copilot.CopilotApiService
+import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.model.llm.LlmIntegration
 import groovy.util.logging.Slf4j
 
@@ -24,52 +26,94 @@ import java.time.Instant
 class LlmUsageSync {
 
 	protected final LlmIntegration llmIntegration
+	protected final MorpheusContext morpheusContext
+
+	static final List<String> RATE_LIMIT_HEADERS = [
+		'x-ratelimit-limit',
+		'x-ratelimit-remaining',
+		'x-ratelimit-reset',
+		'x-ratelimit-resource',
+		'x-ratelimit-limit-requests',
+		'x-ratelimit-remaining-requests',
+		'x-ratelimit-reset-requests',
+		'x-ratelimit-limit-tokens',
+		'x-ratelimit-remaining-tokens',
+		'x-ratelimit-reset-tokens'
+	]
 
 	LlmUsageSync(LlmIntegration llmIntegration) {
-		this.llmIntegration = llmIntegration
+		this(llmIntegration, null)
 	}
 
-	void execute(Map headers) {
-		if(!llmIntegration) {
+	LlmUsageSync(LlmIntegration llmIntegration, MorpheusContext morpheusContext) {
+		this.llmIntegration = llmIntegration
+		this.morpheusContext = morpheusContext
+	}
+
+	void execute(CopilotApiService apiService, String baseUrl, String token, String model) {
+		if(!llmIntegration || !apiService) {
 			return
+		}
+		Map usageResult = apiService.fetchUsageHeaders(baseUrl, token, model) ?: [success: false, msg: 'No usage response from Copilot API']
+		if(usageResult.success != true) {
+			log.warn("Unable to refresh Copilot usage metrics: ${usageResult.msg ?: 'unknown error'}")
+		}
+		Map usageHeaders = extractRateLimitHeaders(usageResult?.headers instanceof Map ? usageResult.headers as Map : [:])
+		boolean usageUpdated = false
+		if(usageHeaders) {
+			usageUpdated = applyHeadersUsageMetrics(usageHeaders)
+		} else {
+			Map responseData = usageResult?.data instanceof Map ? usageResult.data as Map : [:]
+			usageUpdated = applyBodyUsageMetrics(responseData)
+		}
+		if(usageUpdated) {
+			morpheusContext?.llm?.integration.save(llmIntegration)
+		}
+	}
+
+	boolean applyHeadersUsageMetrics(Map headers) {
+		if(!llmIntegration) {
+			return false
 		}
 		Map<String, Map<String, Object>> usageMetrics = buildUsageMetrics(headers)
 		if(!usageMetrics) {
-			return
+			return false
 		}
+		boolean saveRequired = false
 		Map<String, Object> tokenUsage = usageMetrics.tokenUsage ?: [:]
 		if(tokenUsage.containsKey('used')) {
-			llmIntegration.tokenUsageUsed = parseLongValue(tokenUsage.used)
+			saveRequired = assignIfChanged('tokenUsageUsed', parseLongValue(tokenUsage.used)) || saveRequired
 		}
 		if(tokenUsage.containsKey('remaining')) {
-			llmIntegration.tokenUsageRemaining = parseLongValue(tokenUsage.remaining)
+			saveRequired = assignIfChanged('tokenUsageRemaining', parseLongValue(tokenUsage.remaining)) || saveRequired
 		}
 		if(tokenUsage.containsKey('limit')) {
-			llmIntegration.tokenUsageLimit = parseLongValue(tokenUsage.limit)
+			saveRequired = assignIfChanged('tokenUsageLimit', parseLongValue(tokenUsage.limit)) || saveRequired
 		}
 		if(tokenUsage.containsKey('period')) {
-			llmIntegration.tokenUsagePeriod = tokenUsage.period?.toString()
+			saveRequired = assignIfChanged('tokenUsagePeriod', tokenUsage.period?.toString()) || saveRequired
 		}
 		if(tokenUsage.containsKey('resetAt')) {
-			llmIntegration.tokenUsageResetAt = tokenUsage.resetAt?.toString()
+			saveRequired = assignIfChanged('tokenUsageResetAt', tokenUsage.resetAt?.toString()) || saveRequired
 		}
 
 		Map<String, Object> requestUsage = usageMetrics.requestUsage ?: [:]
 		if(requestUsage.containsKey('used')) {
-			llmIntegration.requestUsageUsed = parseLongValue(requestUsage.used)
+			saveRequired = assignIfChanged('requestUsageUsed', parseLongValue(requestUsage.used)) || saveRequired
 		}
 		if(requestUsage.containsKey('remaining')) {
-			llmIntegration.requestUsageRemaining = parseLongValue(requestUsage.remaining)
+			saveRequired = assignIfChanged('requestUsageRemaining', parseLongValue(requestUsage.remaining)) || saveRequired
 		}
 		if(requestUsage.containsKey('limit')) {
-			llmIntegration.requestUsageLimit = parseLongValue(requestUsage.limit)
+			saveRequired = assignIfChanged('requestUsageLimit', parseLongValue(requestUsage.limit)) || saveRequired
 		}
 		if(requestUsage.containsKey('period')) {
-			llmIntegration.requestUsagePeriod = requestUsage.period?.toString()
+			saveRequired = assignIfChanged('requestUsagePeriod', requestUsage.period?.toString()) || saveRequired
 		}
 		if(requestUsage.containsKey('resetAt')) {
-			llmIntegration.requestUsageResetAt = requestUsage.resetAt?.toString()
+			saveRequired = assignIfChanged('requestUsageResetAt', requestUsage.resetAt?.toString()) || saveRequired
 		}
+		return saveRequired
 	}
 
 	protected Map<String, Map<String, Object>> buildUsageMetrics(Map headers) {
@@ -117,6 +161,32 @@ class LlmUsageSync {
 		return usage
 	}
 
+	protected boolean applyBodyUsageMetrics(Map responseData) {
+		if(!(responseData instanceof Map) || responseData.isEmpty()) {
+			return false
+		}
+		Map usage = responseData.usage instanceof Map ? responseData.usage as Map : [:]
+		if(!usage) {
+			return false
+		}
+		Long promptTokens = parseLongValue(usage.prompt_tokens ?: usage.input_tokens)
+		Long completionTokens = parseLongValue(usage.completion_tokens ?: usage.output_tokens)
+		Long totalTokens = parseLongValue(usage.total_tokens)
+		if(totalTokens == null && (promptTokens != null || completionTokens != null)) {
+			totalTokens = (promptTokens ?: 0L) + (completionTokens ?: 0L)
+		}
+		if(totalTokens == null) {
+			return false
+		}
+		boolean saveRequired = false
+		saveRequired = assignIfChanged('tokenUsageUsed', totalTokens) || saveRequired
+		saveRequired = assignIfChanged('tokenUsageRemaining', null) || saveRequired
+		saveRequired = assignIfChanged('tokenUsageLimit', null) || saveRequired
+		saveRequired = assignIfChanged('tokenUsagePeriod', 'request') || saveRequired
+		saveRequired = assignIfChanged('tokenUsageResetAt', null) || saveRequired
+		return saveRequired
+	}
+
 	protected Long parseLongValue(def value) {
 		if(value == null || value == '') {
 			return null
@@ -144,5 +214,30 @@ class LlmUsageSync {
 		} catch(Exception ignored) {
 			return null
 		}
+	}
+
+
+	protected Map<String, String> extractRateLimitHeaders(Map responseHeaders) {
+		Map<String, String> headers = [:]
+		if(!(responseHeaders instanceof Map) || responseHeaders.isEmpty()) {
+			return headers
+		}
+		RATE_LIMIT_HEADERS.each { String headerName ->
+			Map.Entry matchedHeader = responseHeaders.entrySet().find { entry ->
+				entry?.key?.toString()?.equalsIgnoreCase(headerName) && entry?.value != null && entry.value.toString() != ''
+			}
+			if(matchedHeader) {
+				headers[headerName] = matchedHeader.value.toString()
+			}
+		}
+		return headers
+	}
+
+	protected boolean assignIfChanged(String propertyName, Object value) {
+		if(llmIntegration?."${propertyName}" != value) {
+			llmIntegration?."${propertyName}" = value
+			return true
+		}
+		return false
 	}
 }

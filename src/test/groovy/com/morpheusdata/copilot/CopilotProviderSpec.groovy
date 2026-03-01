@@ -19,8 +19,10 @@ import com.morpheusdata.core.MorpheusAccountIntegrationService
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
+import com.morpheusdata.core.integration.MorpheusLlmIntegrationService
 import com.morpheusdata.core.integration.MorpheusLlmModelService
 import com.morpheusdata.core.integration.MorpheusLlmService
+import com.morpheusdata.copilot.sync.LlmModelsSync
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.llm.*
 import com.morpheusdata.response.LlmStreamingResponseHandler
@@ -35,6 +37,7 @@ class CopilotProviderSpec extends Specification {
 	MorpheusContext morpheusContext
 	MorpheusLlmService llmService
 	MorpheusLlmModelService modelService
+	MorpheusLlmIntegrationService integrationService
 	MorpheusAccountIntegrationService accountIntegrationService
 	CopilotApiService apiService
 
@@ -43,11 +46,13 @@ class CopilotProviderSpec extends Specification {
 		morpheusContext = Mock(MorpheusContext)
 		llmService = Mock(MorpheusLlmService)
 		modelService = Mock(MorpheusLlmModelService)
+		integrationService = Mock(MorpheusLlmIntegrationService)
 		accountIntegrationService = Mock(MorpheusAccountIntegrationService)
 
 		morpheusContext.getLlm() >> llmService
 		morpheusContext.getAccountIntegration() >> accountIntegrationService
 		llmService.getModel() >> modelService
+		llmService.getIntegration() >> integrationService
 		modelService.list(_) >> Observable.empty()
 		modelService.bulkCreate(_) >> Single.just(true)
 		modelService.bulkSave(_) >> Single.just(true)
@@ -142,7 +147,10 @@ class CopilotProviderSpec extends Specification {
 		then:
 		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [
 			success: true,
-			data   : [data: []],
+			data   : [data: []]
+		]
+		1 * apiService.fetchUsageHeaders('https://api.githubcopilot.com', 'gh-tok-123', provider.DEFAULT_CHAT_MODEL) >> [
+			success: true,
 			headers: [
 				'x-ratelimit-limit'           : '1000',
 				'x-ratelimit-remaining'       : '850',
@@ -151,7 +159,7 @@ class CopilotProviderSpec extends Specification {
 			]
 		]
 		1 * modelService.list(_) >> Observable.empty()
-		0 * accountIntegrationService.save(_)
+		(0..1) * integrationService.save(integration) >> Single.just(integration)
 		integration.requestUsageLimit == 1000L
 		integration.requestUsageRemaining == 850L
 		integration.requestUsageUsed == 150L
@@ -173,15 +181,44 @@ class CopilotProviderSpec extends Specification {
 		provider.refresh(integration)
 
 		then:
-		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: []], headers: [:]]
+		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: []]]
+		1 * apiService.fetchUsageHeaders('https://api.githubcopilot.com', 'gh-tok-123', provider.DEFAULT_CHAT_MODEL) >> [success: true, headers: [:]]
 		1 * modelService.list(_) >> Observable.empty()
-		0 * accountIntegrationService.save(_)
+		0 * integrationService.save(_)
 		integration.requestUsageLimit == null
 		integration.requestUsageRemaining == null
 		integration.requestUsageUsed == null
 		integration.tokenUsageLimit == null
 		integration.tokenUsageRemaining == null
 		integration.tokenUsageUsed == null
+	}
+
+	def "refresh falls back to response usage when rate limit headers are absent"() {
+		given:
+		AccountIntegration accountIntegration = new AccountIntegration(
+			id: 123L,
+			serviceUrl: 'https://api.githubcopilot.com',
+			serviceToken: 'gh-tok-123'
+		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+
+		when:
+		provider.refresh(integration)
+
+		then:
+		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: []]]
+		1 * apiService.fetchUsageHeaders('https://api.githubcopilot.com', 'gh-tok-123', provider.DEFAULT_CHAT_MODEL) >> [
+			success: true,
+			headers: [:],
+			data   : [usage: [prompt_tokens: 25, completion_tokens: 15, total_tokens: 40]]
+		]
+		1 * modelService.list(_) >> Observable.empty()
+		(0..1) * integrationService.save(integration) >> Single.just(integration)
+		integration.tokenUsageUsed == 40L
+		integration.tokenUsageLimit == null
+		integration.tokenUsageRemaining == null
+		integration.tokenUsagePeriod == 'request'
+		integration.requestUsageUsed == null
 	}
 
 	// --- Chat completion ---
@@ -223,7 +260,7 @@ class CopilotProviderSpec extends Specification {
 		result.data.tokenUsage.totalTokens == 15
 	}
 
-	def "chatCompletion defaults model to gpt-4o when not specified"() {
+	def "chatCompletion defaults model when not specified"() {
 		given:
 		AccountIntegration accountIntegration = new AccountIntegration(
 			serviceUrl: 'https://api.githubcopilot.com',
@@ -240,7 +277,7 @@ class CopilotProviderSpec extends Specification {
 		provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.interact(_, _, '/chat/completions', { Map body -> body.model == 'gpt-4o' }) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
+		1 * apiService.interact(_, _, '/chat/completions', { Map body -> body.model == provider.DEFAULT_CHAT_MODEL }) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
 	}
 
 	def "chatCompletion routes codex models to responses endpoint"() {
@@ -437,45 +474,51 @@ class CopilotProviderSpec extends Specification {
 
 	// --- Model sync ---
 
-	def "syncModels creates new models"() {
+	def "llmModelsSync creates new models"() {
 		given:
 		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
 		LlmIntegration integration = languageModelIntegration(accountIntegration)
-		Map apiResponse = [data: [[id: 'gpt-4o', name: 'GPT-4o']]]
+		LlmModelsSync sync = new LlmModelsSync(morpheusContext, integration, provider.PROVIDER_CODE, apiService)
 
 		when:
-		provider.syncModels(integration, apiResponse)
+		sync.execute('https://api.githubcopilot.com', 'tok') { Map apiResponse ->
+			provider.buildModelsFromApiResponse(integration, apiResponse)
+		}
 
 		then:
+		1 * apiService.listModels('https://api.githubcopilot.com', 'tok') >> [success: true, data: [data: [[id: 'gpt-4o', name: 'GPT-4o']]]]
 		1 * modelService.list(_) >> Observable.empty()
 		1 * modelService.bulkCreate({ List models ->
 			models.size() == 1 && models[0].code == 'gpt-4o' && models[0].llmIntegration?.code == 'language-model-123'
 		}) >> Single.just(true)
 	}
 
-	def "syncModels disables removed models"() {
+	def "llmModelsSync disables removed models"() {
 		given:
 		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
 		LlmIntegration integration = languageModelIntegration(accountIntegration)
-		Map apiResponse = [data: []]
+		LlmModelsSync sync = new LlmModelsSync(morpheusContext, integration, provider.PROVIDER_CODE, apiService)
 		LlmModel existing = new LlmModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = true
 		existing.providerCode = 'github-copilot'
 
 		when:
-		provider.syncModels(integration, apiResponse)
+		sync.execute('https://api.githubcopilot.com', 'tok') { Map apiResponse ->
+			provider.buildModelsFromApiResponse(integration, apiResponse)
+		}
 
 		then:
+		1 * apiService.listModels('https://api.githubcopilot.com', 'tok') >> [success: true, data: [data: []]]
 		1 * modelService.list(_) >> Observable.just(existing)
 		1 * modelService.bulkSave({ List models -> models.size() == 1 && !models[0].enabled }) >> Single.just(true)
 	}
 
-	def "syncModels re-enables reappearing models"() {
+	def "llmModelsSync re-enables reappearing models"() {
 		given:
 		AccountIntegration accountIntegration = new AccountIntegration(id: 123L, serviceToken: 'tok')
 		LlmIntegration integration = languageModelIntegration(accountIntegration)
-		Map apiResponse = [data: [[id: 'gpt-4o', name: 'GPT-4o']]]
+		LlmModelsSync sync = new LlmModelsSync(morpheusContext, integration, provider.PROVIDER_CODE, apiService)
 		LlmModel existing = new LlmModel()
 		existing.code = 'gpt-4o'
 		existing.enabled = false
@@ -485,9 +528,12 @@ class CopilotProviderSpec extends Specification {
 		existing.providerCode = 'github-copilot'
 
 		when:
-		provider.syncModels(integration, apiResponse)
+		sync.execute('https://api.githubcopilot.com', 'tok') { Map apiResponse ->
+			provider.buildModelsFromApiResponse(integration, apiResponse)
+		}
 
 		then:
+		1 * apiService.listModels('https://api.githubcopilot.com', 'tok') >> [success: true, data: [data: [[id: 'gpt-4o', name: 'GPT-4o']]]]
 		1 * modelService.list(_) >> Observable.just(existing)
 		1 * modelService.bulkSave({ List models -> models.size() == 1 && models[0].enabled }) >> Single.just(true)
 	}

@@ -15,6 +15,7 @@
  */
 package com.morpheusdata.copilot.sync
 
+import com.morpheusdata.copilot.CopilotApiService
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.data.DataQuery
 import com.morpheusdata.core.util.SyncTask
@@ -29,14 +30,53 @@ class LlmModelsSync {
 	protected final MorpheusContext morpheusContext
 	protected final LlmIntegration llmIntegration
 	protected final String providerCode
+	protected final CopilotApiService apiService
+
+	LlmModelsSync(LlmIntegration llmIntegration) {
+		this(null, llmIntegration, null, null)
+	}
 
 	LlmModelsSync(MorpheusContext morpheusContext, LlmIntegration llmIntegration, String providerCode) {
+		this(morpheusContext, llmIntegration, providerCode, new CopilotApiService())
+	}
+
+	LlmModelsSync(MorpheusContext morpheusContext, LlmIntegration llmIntegration, String providerCode, CopilotApiService apiService) {
 		this.morpheusContext = morpheusContext
 		this.llmIntegration = llmIntegration
 		this.providerCode = providerCode
+		this.apiService = apiService
+	}
+
+	Map execute(MorpheusContext morpheusContext, CopilotApiService apiService, String providerCode, String baseUrl, String token, Closure<Collection<LlmModel>> modelBuilder) {
+		return new LlmModelsSync(morpheusContext, llmIntegration, providerCode, apiService).execute(baseUrl, token, modelBuilder)
+	}
+
+	Map execute(String baseUrl, String token, Closure<Collection<LlmModel>> modelBuilder) {
+		if(!apiService) {
+			return [success: false, msg: 'Copilot API service is not configured']
+		}
+		Map result = apiService.listModels(baseUrl, token) ?: [success: false, msg: 'No response from Copilot models API']
+		if(result.success) {
+			Collection<LlmModel> freshModels = []
+			if(modelBuilder) {
+				Map apiResponse = result.data instanceof Map ? result.data as Map : [:]
+				def builtModels = modelBuilder.call(apiResponse)
+				if(builtModels instanceof Collection) {
+					freshModels = builtModels as Collection<LlmModel>
+				}
+			}
+			execute(freshModels)
+		} else {
+			log.warn("Failed to refresh models from Copilot: ${result.msg}")
+		}
+		return result
 	}
 
 	void execute(Collection<LlmModel> freshModels) {
+		if(!morpheusContext || !providerCode) {
+			log.warn("Skipping Copilot model sync: sync context is incomplete")
+			return
+		}
 		if(!llmIntegration?.id) {
 			log.warn("Skipping Copilot model sync: LLM integration is not persisted")
 			return
@@ -63,7 +103,7 @@ class LlmModelsSync {
 		List<LlmModel> saveList = []
 		removeList?.each { LlmModel model ->
 			if(model?.enabled) {
-				log.info("Disabling removed Copilot model: ${model.code}")
+				log.debug("Disabling removed Copilot model: ${model.code}")
 				model.enabled = false
 				saveList << model
 			}
@@ -80,7 +120,7 @@ class LlmModelsSync {
 		addList.each { LlmModel model ->
 			model.llmIntegration = llmIntegration
 			model.enabled = model.enabled != false
-			log.info("Adding new Copilot model: ${model.code}")
+			log.debug("Adding new Copilot model: ${model.code}")
 		}
 		morpheusContext.llm.model.bulkCreate(addList).blockingGet()
 	}

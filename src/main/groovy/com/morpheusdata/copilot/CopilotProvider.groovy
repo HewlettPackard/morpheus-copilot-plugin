@@ -47,7 +47,7 @@ class CopilotProvider implements LlmProvider {
 	static final String PROVIDER_CODE = 'github-copilot'
 	static final String PROVIDER_NAME = 'GitHub Copilot'
 	static final String DEFAULT_API_URL = 'https://api.githubcopilot.com'
-	static final String DEFAULT_CHAT_MODEL = 'gpt-4o'
+	static final String DEFAULT_CHAT_MODEL = 'gpt-5-mini'
 
 	CopilotProvider(Plugin plugin, MorpheusContext morpheusContext) {
 		this.plugin = plugin
@@ -171,8 +171,10 @@ class CopilotProvider implements LlmProvider {
 				log.warn("Cannot refresh Copilot integration – no GitHub token configured")
 				return
 			}
-			def syncResult = syncModels(llmIntegration, baseUrl, token)
-			new LlmUsageSync(llmIntegration).execute(syncResult?.headers instanceof Map ? syncResult.headers as Map : [:])
+			new LlmModelsSync(llmIntegration).execute(morpheusContext, apiService, PROVIDER_CODE, baseUrl, token) { Map apiResponse ->
+				buildModelsFromApiResponse(llmIntegration, apiResponse)
+			}
+			new LlmUsageSync(llmIntegration, morpheusContext).execute(apiService, baseUrl, token, DEFAULT_CHAT_MODEL)
 		} catch (Exception e) {
 			log.error("Error refreshing Copilot integration: ${e.message}", e)
 		}
@@ -241,29 +243,6 @@ class CopilotProvider implements LlmProvider {
 	}
 
 	// --- Helper methods ---
-
-	/**
-	 * Sync model cache from the Copilot models API.
-	 */
-	protected Map syncModels(LlmIntegration llmIntegration, String baseUrl, String token) {
-		def result = apiService.listModels(baseUrl, token)
-		if(result.success) {
-			if(result.data) {
-				syncModels(llmIntegration, result.data)
-			}
-		} else {
-			log.warn("Failed to refresh models from Copilot: ${result.msg}")
-		}
-		return result
-	}
-
-	/**
-	 * Sync persisted models with the latest API response payload.
-	 */
-	protected void syncModels(LlmIntegration llmIntegration, Map apiResponse) {
-		List<LlmModel> freshModels = buildModelsFromApiResponse(llmIntegration, apiResponse)
-		new LlmModelsSync(morpheusContext, llmIntegration, PROVIDER_CODE).execute(freshModels)
-	}
 
 	/**
 	 * Resolve the GitHub token from the integration credentials.
