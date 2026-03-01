@@ -15,6 +15,7 @@
  */
 package com.morpheusdata.copilot
 
+import com.morpheusdata.core.MorpheusAccountIntegrationService
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
@@ -34,6 +35,7 @@ class CopilotProviderSpec extends Specification {
 	MorpheusContext morpheusContext
 	MorpheusLlmService llmService
 	MorpheusLlmModelService modelService
+	MorpheusAccountIntegrationService accountIntegrationService
 	CopilotApiService apiService
 
 	def setup() {
@@ -41,12 +43,15 @@ class CopilotProviderSpec extends Specification {
 		morpheusContext = Mock(MorpheusContext)
 		llmService = Mock(MorpheusLlmService)
 		modelService = Mock(MorpheusLlmModelService)
+		accountIntegrationService = Mock(MorpheusAccountIntegrationService)
 
 		morpheusContext.getLlm() >> llmService
+		morpheusContext.getAccountIntegration() >> accountIntegrationService
 		llmService.getModel() >> modelService
 		modelService.list(_) >> Observable.empty()
 		modelService.bulkCreate(_) >> Single.just(true)
 		modelService.bulkSave(_) >> Single.just(true)
+		accountIntegrationService.save(_) >> Single.just(new AccountIntegration())
 
 		provider = new CopilotProvider(plugin, morpheusContext)
 		apiService = Mock(CopilotApiService)
@@ -122,23 +127,61 @@ class CopilotProviderSpec extends Specification {
 		result.errors?.error?.contains('GitHub Token is required')
 	}
 
-	// --- Models ---
-
-	def "listModels refreshes from API when cache is empty"() {
+	def "refresh updates llm integration usage metrics from Copilot rate limit headers"() {
 		given:
 		AccountIntegration accountIntegration = new AccountIntegration(
+			id: 123L,
 			serviceUrl: 'https://api.githubcopilot.com',
 			serviceToken: 'gh-tok-123'
 		)
 		LlmIntegration integration = languageModelIntegration(accountIntegration)
 
 		when:
-		def result = provider.listModels(integration, [:])
+		provider.refresh(integration)
 
 		then:
-		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: [[id: 'gpt-4o', name: 'GPT-4o']]]]
-		result.success
-		result.data instanceof List
+		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [
+			success: true,
+			data   : [data: []],
+			headers: [
+				'x-ratelimit-limit'           : '1000',
+				'x-ratelimit-remaining'       : '850',
+				'x-ratelimit-limit-tokens'    : '200000',
+				'x-ratelimit-remaining-tokens': '180000'
+			]
+		]
+		1 * modelService.list(_) >> Observable.empty()
+		0 * accountIntegrationService.save(_)
+		integration.requestUsageLimit == 1000L
+		integration.requestUsageRemaining == 850L
+		integration.requestUsageUsed == 150L
+		integration.tokenUsageLimit == 200000L
+		integration.tokenUsageRemaining == 180000L
+		integration.tokenUsageUsed == 20000L
+	}
+
+	def "refresh leaves llm integration usage metrics unchanged when headers are absent"() {
+		given:
+		AccountIntegration accountIntegration = new AccountIntegration(
+			id: 123L,
+			serviceUrl: 'https://api.githubcopilot.com',
+			serviceToken: 'gh-tok-123'
+		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+
+		when:
+		provider.refresh(integration)
+
+		then:
+		1 * apiService.listModels('https://api.githubcopilot.com', 'gh-tok-123') >> [success: true, data: [data: []], headers: [:]]
+		1 * modelService.list(_) >> Observable.empty()
+		0 * accountIntegrationService.save(_)
+		integration.requestUsageLimit == null
+		integration.requestUsageRemaining == null
+		integration.requestUsageUsed == null
+		integration.tokenUsageLimit == null
+		integration.tokenUsageRemaining == null
+		integration.tokenUsageUsed == null
 	}
 
 	// --- Chat completion ---
@@ -357,7 +400,7 @@ class CopilotProviderSpec extends Specification {
 		models*.code.contains('gpt-4o')
 		models*.code.contains('claude-sonnet-4')
 		models*.code.contains('text-embedding-3-small')
-		models.every { it.languageModelIntegration?.code == 'language-model-7' }
+		models.every { it.llmIntegration?.code == 'language-model-7' }
 		models.find { it.code == 'gpt-4o' }?.metadata?.interactionEndpoint == '/chat/completions'
 		models.find { it.code == 'gpt-4o' }?.maxOutputTokens == 4096L
 		models.find { it.code == 'text-embedding-3-small' }?.metadata?.interactionEndpoint == '/v1/embeddings'
@@ -406,7 +449,7 @@ class CopilotProviderSpec extends Specification {
 		then:
 		1 * modelService.list(_) >> Observable.empty()
 		1 * modelService.bulkCreate({ List models ->
-			models.size() == 1 && models[0].code == 'gpt-4o' && models[0].languageModelIntegration?.code == 'language-model-123'
+			models.size() == 1 && models[0].code == 'gpt-4o' && models[0].llmIntegration?.code == 'language-model-123'
 		}) >> Single.just(true)
 	}
 

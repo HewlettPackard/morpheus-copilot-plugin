@@ -40,6 +40,18 @@ class CopilotApiService {
 	static final String DEFAULT_INTERACTION_PATH = CHAT_COMPLETIONS_PATH
 	static final String COPILOT_INTEGRATION_HEADER = 'Copilot-Integration-Id'
 	static final String COPILOT_INTEGRATION_ID = 'copilot-developer-cli'
+	static final List<String> RATE_LIMIT_HEADERS = [
+		'x-ratelimit-limit',
+		'x-ratelimit-remaining',
+		'x-ratelimit-reset',
+		'x-ratelimit-resource',
+		'x-ratelimit-limit-requests',
+		'x-ratelimit-remaining-requests',
+		'x-ratelimit-reset-requests',
+		'x-ratelimit-limit-tokens',
+		'x-ratelimit-remaining-tokens',
+		'x-ratelimit-reset-tokens'
+	]
 
 	/**
 	 * List available models from GitHub Copilot.
@@ -165,7 +177,7 @@ class CopilotApiService {
 			if (responseCode == 200) {
 				String responseBody = connection.inputStream.text
 				Map data = new JsonSlurper().parseText(responseBody) as Map
-				return [success: true, data: data]
+				return [success: true, data: data, headers: extractRateLimitHeaders(connection)]
 			} else {
 				String errorBody = connection.errorStream?.text ?: 'Unknown error'
 				log.warn("Copilot API GET ${urlString} returned ${responseCode}: ${errorBody}")
@@ -177,6 +189,17 @@ class CopilotApiService {
 		} finally {
 			connection?.disconnect()
 		}
+	}
+
+	protected Map<String, String> extractRateLimitHeaders(HttpURLConnection connection) {
+		Map<String, String> headers = [:]
+		RATE_LIMIT_HEADERS.each { String headerName ->
+			String value = connection.getHeaderField(headerName)
+			if(value != null && value != '') {
+				headers[headerName] = value
+			}
+		}
+		return headers
 	}
 
 	/**

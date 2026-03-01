@@ -18,6 +18,8 @@ package com.morpheusdata.copilot
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
+import com.morpheusdata.copilot.sync.LlmModelsSync
+import com.morpheusdata.copilot.sync.LlmUsageSync
 import com.morpheusdata.core.providers.LlmProvider
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.Icon
@@ -169,38 +171,10 @@ class CopilotProvider implements LlmProvider {
 				log.warn("Cannot refresh Copilot integration – no GitHub token configured")
 				return
 			}
-			def result = apiService.listModels(baseUrl, token)
-			if (result.success && result.data) {
-				syncModels(llmIntegration, result.data)
-			} else {
-				log.warn("Failed to refresh models from Copilot: ${result.msg}")
-			}
+			def syncResult = syncModels(llmIntegration, baseUrl, token)
+			new LlmUsageSync(llmIntegration).execute(syncResult?.headers instanceof Map ? syncResult.headers as Map : [:])
 		} catch (Exception e) {
 			log.error("Error refreshing Copilot integration: ${e.message}", e)
-		}
-	}
-
-	@Override
-	ServiceResponse<List<LlmModel>> listModels(LlmIntegration llmIntegration, Map opts) {
-		try {
-			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
-			if(!accountIntegration) {
-				return ServiceResponse.error('Account integration is required for Copilot integration')
-			}
-			List<LlmModel> models = loadPersistedModels(llmIntegration)
-			if (!models) {
-				String token = resolveToken(accountIntegration)
-				String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
-				def modelsResult = apiService.listModels(baseUrl, token)
-				if (modelsResult.success && modelsResult.data) {
-					syncModels(llmIntegration, modelsResult.data)
-					models = loadPersistedModels(llmIntegration)
-				}
-			}
-			return ServiceResponse.success(models ?: [])
-		} catch (Exception e) {
-			log.error("Error fetching Copilot models: ${e.message}", e)
-			return ServiceResponse.error("Failed to fetch models: ${e.message}")
 		}
 	}
 
@@ -269,101 +243,26 @@ class CopilotProvider implements LlmProvider {
 	// --- Helper methods ---
 
 	/**
-	 * Sync persisted models with the latest API response.
-	 * New models are created, removed models are disabled, reappearing models are re-enabled.
+	 * Sync model cache from the Copilot models API.
 	 */
-	protected void syncModels(LlmIntegration llmIntegration, Map apiResponse) {
-		List<LlmModel> freshModels = buildModelsFromApiResponse(llmIntegration, apiResponse)
-		Set<String> freshCodes = freshModels.collect { it.code } as Set
-
-		List<LlmModel> existingModels = loadPersistedModels(llmIntegration)
-		Map<String, LlmModel> existingByCode = existingModels.collectEntries { [(it.code): it] }
-
-		def modelService = morpheusContext.llm.model
-		List<LlmModel> toSave = []
-		List<LlmModel> toCreate = []
-
-		// Disable models that no longer appear in the API
-		existingByCode.each { code, model ->
-			if (!freshCodes.contains(code) && model.enabled) {
-				log.info("Disabling removed Copilot model: ${code}")
-				model.enabled = false
-				toSave << model
+	protected Map syncModels(LlmIntegration llmIntegration, String baseUrl, String token) {
+		def result = apiService.listModels(baseUrl, token)
+		if(result.success) {
+			if(result.data) {
+				syncModels(llmIntegration, result.data)
 			}
+		} else {
+			log.warn("Failed to refresh models from Copilot: ${result.msg}")
 		}
-
-		// Add new models, re-enable ones that reappear
-		freshModels.each { freshModel ->
-			LlmModel existing = existingByCode[freshModel.code]
-			if (existing) {
-				boolean changed = false
-				if (llmIntegration?.id && existing.llmIntegration?.id != llmIntegration.id) {
-					existing.llmIntegration = llmIntegration
-					changed = true
-				}
-				if (!existing.enabled) {
-					log.info("Re-enabling Copilot model: ${freshModel.code}")
-					existing.enabled = true
-					changed = true
-				}
-				if (existing.contextWindow != freshModel.contextWindow) {
-					existing.contextWindow = freshModel.contextWindow
-					changed = true
-				}
-				if (existing.name != freshModel.name) {
-					existing.name = freshModel.name
-					changed = true
-				}
-				if (existing.modelType != freshModel.modelType) {
-					existing.modelType = freshModel.modelType
-					changed = true
-				}
-				if (existing.maxOutputTokens != freshModel.maxOutputTokens) {
-					existing.maxOutputTokens = freshModel.maxOutputTokens
-					changed = true
-				}
-				Map existingMetadata = existing.metadata ?: [:]
-				Map freshMetadata = freshModel.metadata ?: [:]
-				if (existingMetadata != freshMetadata) {
-					existing.metadata = freshMetadata
-					existing.configMap = freshMetadata
-					changed = true
-				}
-				if (changed) {
-					toSave << existing
-				}
-			} else {
-				log.info("Adding new Copilot model: ${freshModel.code}")
-				toCreate << freshModel
-			}
-		}
-
-		if (toCreate) {
-			modelService.bulkCreate(toCreate).blockingGet()
-		}
-		if (toSave) {
-			modelService.bulkSave(toSave).blockingGet()
-		}
+		return result
 	}
 
 	/**
-	 * Load persisted models for this integration from the DataService.
+	 * Sync persisted models with the latest API response payload.
 	 */
-	protected List<LlmModel> loadPersistedModels(LlmIntegration llmIntegration) {
-		try {
-			if(!llmIntegration?.id) {
-				return []
-			}
-			def modelService = morpheusContext.llm.model
-			DataQuery query = new DataQuery().withFilter('providerCode', PROVIDER_CODE)
-			query.withFilter('llmIntegration.id', llmIntegration.id)
-			return modelService.list(
-				query
-			).toList().blockingGet() ?: []
-		} catch (Exception e) {
-			log.debug("Could not load persisted models: ${e.message}")
-			return []
-		}
+	protected void syncModels(LlmIntegration llmIntegration, Map apiResponse) {
+		List<LlmModel> freshModels = buildModelsFromApiResponse(llmIntegration, apiResponse)
+		new LlmModelsSync(morpheusContext, llmIntegration, PROVIDER_CODE).execute(freshModels)
 	}
 
 	/**
@@ -417,16 +316,6 @@ class CopilotProvider implements LlmProvider {
 			typeCompare != 0 ? typeCompare : (a.name ?: '').compareTo(b.name ?: '')
 		}
 		return models
-	}
-
-	protected LlmIntegration buildLlmIntegrationRef(LlmIntegration llmIntegration) {
-		if(!llmIntegration?.id) {
-			return null
-		}
-		LlmIntegration integrationRef = new LlmIntegration()
-		integrationRef.id = llmIntegration.id
-		integrationRef.code = llmIntegration.code
-		return integrationRef
 	}
 
 	/**
