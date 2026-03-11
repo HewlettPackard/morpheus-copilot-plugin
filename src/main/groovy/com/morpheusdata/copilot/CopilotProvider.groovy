@@ -409,7 +409,23 @@ class CopilotProvider implements LlmProvider {
 
 	protected Map buildInteractionRequestBody(LlmChatRequest request, String model, String endpointPath, Boolean stream) {
 		def apiMessages = request.messages?.collect { msg ->
-			[role: msg.role ?: 'user', content: msg.content]
+			def m = [role: msg.role ?: 'user', content: msg.content]
+			// Pass through tool_calls and tool_call_id for multi-turn tool conversations
+			if (msg.metadata?.tool_calls) {
+				// Ensure arguments are JSON strings (OpenAI API requirement)
+				m.tool_calls = msg.metadata.tool_calls.collect { tc ->
+					def copy = new LinkedHashMap(tc)
+					if (copy.function?.arguments != null && !(copy.function.arguments instanceof String)) {
+						copy.function = new LinkedHashMap(copy.function)
+						copy.function.arguments = new groovy.json.JsonBuilder(copy.function.arguments).toString()
+					}
+					return copy
+				}
+			}
+			if (msg.metadata?.tool_call_id) {
+				m.tool_call_id = msg.metadata.tool_call_id
+			}
+			return m
 		} ?: []
 		Map requestBody
 		if(isResponsesEndpoint(endpointPath)) {
@@ -445,6 +461,13 @@ class CopilotProvider implements LlmProvider {
 			}
 			if (request.stopSequences) {
 				requestBody.stop = request.stopSequences
+			}
+			// Pass through tool definitions from request options for function calling
+			if (request.options?.tools) {
+				requestBody.tools = request.options.tools
+			}
+			if (request.options?.tool_choice) {
+				requestBody.tool_choice = request.options.tool_choice
 			}
 		}
 		if(stream != null) {
@@ -604,6 +627,9 @@ class CopilotProvider implements LlmProvider {
 
 	/**
 	 * Parse OpenAI-compatible chat completion response into LlmChatResponse.
+	 * Extracts tool_calls from the response message when the model requests
+	 * function/tool invocations, storing them in response metadata so the
+	 * caller can execute them.
 	 */
 	protected LlmChatResponse parseChatResponse(Map data) {
 		LlmChatResponse response = new LlmChatResponse()
@@ -620,6 +646,25 @@ class CopilotProvider implements LlmProvider {
 				msg.role = messageData.role?.toString() ?: 'assistant'
 				msg.content = messageData.content?.toString()
 				response.message = msg
+
+				// Extract tool_calls from the OpenAI-format response
+				def toolCalls = messageData.tool_calls
+				if (toolCalls instanceof List && toolCalls.size() > 0) {
+					List<Map> normalizedToolCalls = toolCalls.collect { tc ->
+						Map toolCall = [
+							id: tc.id?.toString() ?: UUID.randomUUID().toString(),
+							type: tc.type?.toString() ?: 'function'
+						]
+						if (tc.function instanceof Map) {
+							toolCall.function = [
+								name: tc.function.name?.toString(),
+								arguments: tc.function.arguments?.toString() ?: '{}'
+							]
+						}
+						return toolCall
+					}
+					response.metadata.put('tool_calls', normalizedToolCalls)
+				}
 			}
 		}
 
