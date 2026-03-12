@@ -661,33 +661,40 @@ static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 
 		def choices = data.choices
 		if (choices instanceof List && choices.size() > 0) {
-			def choice = choices[0]
-			response.finishReason = choice.finish_reason?.toString()
-			def messageData = choice.message
-			if (messageData) {
-				LlmChatMessage msg = new LlmChatMessage()
-				msg.role = messageData.role?.toString() ?: 'assistant'
-				msg.content = messageData.content?.toString()
-				response.message = msg
+			// Claude via Copilot may return multiple choice objects:
+			//   choices[0] = text content (finish_reason: tool_calls, no tool_calls array)
+			//   choices[1..n] = actual tool call(s) with tool_calls array
+			// We merge text from the first choice and tool_calls from any choice that has them.
+			def textChoice = choices[0]
+			response.finishReason = textChoice.finish_reason?.toString()
 
-				// Extract tool_calls from the OpenAI-format response
-				def toolCalls = messageData.tool_calls
-				if (toolCalls instanceof List && toolCalls.size() > 0) {
-					List<Map> normalizedToolCalls = toolCalls.collect { tc ->
-						Map toolCall = [
-							id: tc.id?.toString() ?: UUID.randomUUID().toString(),
-							type: tc.type?.toString() ?: 'function'
+			LlmChatMessage msg = new LlmChatMessage()
+			msg.role = textChoice.message?.role?.toString() ?: 'assistant'
+			msg.content = textChoice.message?.content?.toString()
+			response.message = msg
+
+			// Collect tool_calls from ALL choices (Claude splits them across choice objects)
+			List allToolCalls = []
+			choices.each { choice ->
+				def tc = choice?.message?.tool_calls
+				if (tc instanceof List) allToolCalls.addAll(tc)
+			}
+
+			if (allToolCalls) {
+				List<Map> normalizedToolCalls = allToolCalls.collect { tc ->
+					Map toolCall = [
+						id: tc.id?.toString() ?: UUID.randomUUID().toString(),
+						type: tc.type?.toString() ?: 'function'
+					]
+					if (tc.function instanceof Map) {
+						toolCall.function = [
+							name: tc.function.name?.toString(),
+							arguments: tc.function.arguments?.toString() ?: '{}'
 						]
-						if (tc.function instanceof Map) {
-							toolCall.function = [
-								name: tc.function.name?.toString(),
-								arguments: tc.function.arguments?.toString() ?: '{}'
-							]
-						}
-						return toolCall
 					}
-					response.metadata.put('tool_calls', normalizedToolCalls)
+					return toolCall
 				}
+				response.metadata.put('tool_calls', normalizedToolCalls)
 			}
 		}
 
