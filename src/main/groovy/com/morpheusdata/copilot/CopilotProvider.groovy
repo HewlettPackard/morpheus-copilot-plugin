@@ -47,7 +47,7 @@ class CopilotProvider implements LlmProvider {
 	static final String PROVIDER_CODE = 'github-copilot'
 	static final String PROVIDER_NAME = 'GitHub Copilot'
 	static final String DEFAULT_API_URL = 'https://api.githubcopilot.com'
-	static final String DEFAULT_CHAT_MODEL = 'gpt-5-mini'
+static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 
 	CopilotProvider(Plugin plugin, MorpheusContext morpheusContext) {
 		this.plugin = plugin
