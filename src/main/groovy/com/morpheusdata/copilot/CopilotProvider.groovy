@@ -182,28 +182,51 @@ static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 
 	@Override
 	ServiceResponse<LlmChatResponse> generateResponse(LlmIntegration llmIntegration, LlmChatRequest request, Map opts) {
-		try {
-			AccountIntegration accountIntegration = llmIntegration?.accountIntegration
-			if(!accountIntegration) {
-				return ServiceResponse.error('Account integration is required for Copilot integration')
-			}
-			String token = resolveToken(accountIntegration)
-			String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
-			String model = request.model ?: DEFAULT_CHAT_MODEL
-			LlmModel persistedModel = loadPersistedModel(llmIntegration, model)
-			String interactionEndpoint = resolveInteractionEndpoint(model, persistedModel)
-			Map requestBody = buildInteractionRequestBody(request, model, interactionEndpoint, false)
-			def result = apiService.interact(baseUrl, token, interactionEndpoint, requestBody)
-			if (result.success && result.data) {
-				LlmChatResponse response = isResponsesEndpoint(interactionEndpoint) ? parseResponsesChatResponse(result.data) : parseChatResponse(result.data)
-				return ServiceResponse.success(response)
-			} else {
-				return ServiceResponse.error(result.msg ?: 'Chat completion failed')
-			}
-		} catch (Exception e) {
-			log.error("Error during Copilot chat completion: ${e.message}", e)
-			return ServiceResponse.error("Chat completion failed: ${e.message}")
+		AccountIntegration accountIntegration = llmIntegration?.accountIntegration
+		if(!accountIntegration) {
+			return ServiceResponse.error('Account integration is required for Copilot integration')
 		}
+		String token = resolveToken(accountIntegration)
+		String baseUrl = accountIntegration.serviceUrl ?: DEFAULT_API_URL
+		String model = request.model ?: DEFAULT_CHAT_MODEL
+		LlmModel persistedModel = loadPersistedModel(llmIntegration, model)
+		String interactionEndpoint = resolveInteractionEndpoint(model, persistedModel)
+		Map requestBody = buildInteractionRequestBody(request, model, interactionEndpoint, false)
+
+		// Retry up to 2 times on stale-connection errors (NoHttpResponseException).
+		// HttpApiClient uses a pooled HTTP client; Copilot aggressively closes keep-alive
+		// connections, so the first attempt on a recycled socket often fails silently.
+		int maxAttempts = 3
+		Exception lastException = null
+		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+			if (attempt > 1) {
+				log.warn("Copilot API retry ${attempt - 1}/${maxAttempts - 1} after connection failure")
+				Thread.sleep(1500L * (attempt - 1))  // 1.5s, then 3s
+			}
+			try {
+				def result = apiService.interact(baseUrl, token, interactionEndpoint, requestBody)
+				if (result.success && result.data) {
+					LlmChatResponse response = isResponsesEndpoint(interactionEndpoint) ? parseResponsesChatResponse(result.data) : parseChatResponse(result.data)
+					return ServiceResponse.success(response)
+				} else {
+					// Non-connection error (e.g. 4xx/5xx) — don't retry
+					return ServiceResponse.error(result.msg ?: 'Chat completion failed')
+				}
+			} catch (Exception e) {
+				lastException = e
+				def msg = e.message?.toLowerCase() ?: ''
+				boolean isConnErr = msg.contains('failed to respond') || msg.contains('connection') ||
+					msg.contains('reset') || msg.contains('broken pipe') || msg.contains('socket') ||
+					msg.contains('nohttpresponse') || msg.contains('stream closed')
+				if (isConnErr && attempt < maxAttempts) {
+					log.warn("Copilot connection error (attempt ${attempt}): ${e.message}")
+					continue
+				}
+				log.error("Error during Copilot chat completion: ${e.message}", e)
+				return ServiceResponse.error("Chat completion failed: ${e.message}")
+			}
+		}
+		return ServiceResponse.error("Chat completion failed after ${maxAttempts} attempts: ${lastException?.message}")
 	}
 
 	@Override
