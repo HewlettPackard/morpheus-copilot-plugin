@@ -193,18 +193,19 @@ static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 		String interactionEndpoint = resolveInteractionEndpoint(model, persistedModel)
 		Map requestBody = buildInteractionRequestBody(request, model, interactionEndpoint, false)
 
-		// Retry up to 2 times on stale-connection errors (NoHttpResponseException).
-		// HttpApiClient uses a pooled HTTP client; Copilot aggressively closes keep-alive
-		// connections, so the first attempt on a recycled socket often fails silently.
+		// Retry up to 2 times on transient connection errors. Session-scoped clients
+		// keep chat conversations isolated from each other while still allowing a
+		// single conversation to reuse its own connection pool across turns.
 		int maxAttempts = 3
 		Exception lastException = null
+		Map requestOpts = opts ?: [:]
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
 			if (attempt > 1) {
 				log.warn("Copilot API retry ${attempt - 1}/${maxAttempts - 1} after connection failure")
 				Thread.sleep(1500L * (attempt - 1))  // 1.5s, then 3s
 			}
 			try {
-				def result = apiService.interact(baseUrl, token, interactionEndpoint, requestBody)
+				def result = apiService.interact(baseUrl, token, interactionEndpoint, requestBody, requestOpts)
 				if (result.success && result.data) {
 					LlmChatResponse response = isResponsesEndpoint(interactionEndpoint) ? parseResponsesChatResponse(result.data) : parseChatResponse(result.data)
 					return ServiceResponse.success(response)
@@ -258,7 +259,7 @@ static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 			}
 
 			Map requestBody = buildInteractionRequestBody(request, model, streamingEndpoint, true)
-			apiService.streamInteract(baseUrl, token, streamingEndpoint, requestBody, handler)
+			apiService.streamInteract(baseUrl, token, streamingEndpoint, requestBody, handler, opts ?: [:])
 		} catch (Exception e) {
 			log.error("Error during Copilot streaming chat: ${e.message}", e)
 			handler?.onError(e)

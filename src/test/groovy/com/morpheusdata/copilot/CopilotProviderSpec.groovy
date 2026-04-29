@@ -241,7 +241,7 @@ class CopilotProviderSpec extends Specification {
 		def result = provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', _) >> [
+		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', _, _) >> [
 			success: true,
 			data   : [
 				id     : 'chatcmpl-abc',
@@ -277,7 +277,7 @@ class CopilotProviderSpec extends Specification {
 		provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.interact(_, _, '/chat/completions', { Map body -> body.model == provider.DEFAULT_CHAT_MODEL }) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
+		1 * apiService.interact(_, _, '/chat/completions', { Map body -> body.model == provider.DEFAULT_CHAT_MODEL }, _) >> [success: true, data: [choices: [[message: [content: 'ok']]]]]
 	}
 
 	def "chatCompletion routes codex models to responses endpoint"() {
@@ -301,7 +301,7 @@ class CopilotProviderSpec extends Specification {
 		then:
 		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/responses', { Map body ->
 			body.model == 'gpt-5.1-codex' && body.input instanceof List && body.max_output_tokens == 2048 && body.stream == false
-		}) >> [
+		}, _) >> [
 			success: true,
 			data   : [
 				id         : 'resp_123',
@@ -331,7 +331,7 @@ class CopilotProviderSpec extends Specification {
 		def result = provider.generateResponse(integration, request, [:])
 
 		then:
-		1 * apiService.interact(_, _, '/chat/completions', _) >> [success: false, msg: 'Rate limited']
+		1 * apiService.interact(_, _, '/chat/completions', _, _) >> [success: false, msg: 'Rate limited']
 		!result.success
 		result.errors?.error?.contains('Rate limited')
 	}
@@ -359,7 +359,7 @@ class CopilotProviderSpec extends Specification {
 		then:
 		1 * apiService.streamInteract('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', { Map body ->
 			body.model == 'claude-sonnet-4' && body.stream == true
-		}, handler)
+		}, handler, _)
 	}
 
 	def "streamChatCompletion for codex models uses responses fallback"() {
@@ -383,7 +383,7 @@ class CopilotProviderSpec extends Specification {
 		then:
 		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/responses', { Map body ->
 			body.model == 'gpt-5.1-codex' && body.input instanceof List && body.stream == false
-		}) >> [
+		}, _) >> [
 			success: true,
 			data   : [
 				id         : 'resp_456',
@@ -392,11 +392,36 @@ class CopilotProviderSpec extends Specification {
 				output_text: 'Codex output'
 			]
 		]
-		0 * apiService.streamInteract(_, _, _, _, _)
+		0 * apiService.streamInteract(_, _, _, _, _, _)
 		1 * handler.onPartialResponse('Codex output')
 		1 * handler.onCompleteResponse({ LlmChatResponse response ->
 			response.message?.content == 'Codex output'
 		})
+	}
+
+	def "chatCompletion forwards the client scope key to the api service"() {
+		given:
+		AccountIntegration accountIntegration = new AccountIntegration(
+			serviceUrl: 'https://api.githubcopilot.com',
+			serviceToken: 'gh-tok-123'
+		)
+		LlmIntegration integration = languageModelIntegration(accountIntegration)
+		LlmChatRequest request = new LlmChatRequest(model: 'gpt-4o', messages: [new LlmChatMessage(role: 'user', content: 'Hello')])
+		Map opts = [clientScopeKey: 'lease-123']
+
+		when:
+		def result = provider.generateResponse(integration, request, opts)
+
+		then:
+		1 * apiService.interact('https://api.githubcopilot.com', 'gh-tok-123', '/chat/completions', _, opts) >> [
+			success: true,
+			data   : [
+				model  : 'gpt-4o',
+				choices: [[message: [role: 'assistant', content: 'Scoped']]]
+			]
+		]
+		result.success
+		result.data.message.content == 'Scoped'
 	}
 
 	// --- Model building & categorization ---

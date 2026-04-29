@@ -25,6 +25,8 @@ import groovy.util.logging.Slf4j
 import org.apache.http.client.methods.CloseableHttpResponse
 import org.apache.http.util.EntityUtils
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * HTTP client service for GitHub Copilot API interactions.
  * The Copilot API is OpenAI-compatible, using the same request/response format
@@ -42,9 +44,23 @@ class CopilotApiService {
 	static final String DEFAULT_INTERACTION_PATH = CHAT_COMPLETIONS_PATH
 	static final String COPILOT_INTEGRATION_HEADER = 'Copilot-Integration-Id'
 	static final String COPILOT_INTEGRATION_ID = 'copilot-developer-cli'
+	static final String CLIENT_SCOPE_KEY = 'clientScopeKey'
 	static final Integer DEFAULT_CONNECTION_TIMEOUT = 30000
 	static final Integer DEFAULT_READ_TIMEOUT = 30000
 	static final Integer DEFAULT_INTERACT_READ_TIMEOUT = 120000
+	static final Long SESSION_CLIENT_TTL_MS = 60L * 60L * 1000L
+
+	protected final ConcurrentHashMap<String, SessionClientHolder> sessionClients = new ConcurrentHashMap<>()
+
+	protected static class SessionClientHolder {
+		final HttpApiClient apiClient
+		volatile long lastUsedAt
+
+		SessionClientHolder(HttpApiClient apiClient, long lastUsedAt) {
+			this.apiClient = apiClient
+			this.lastUsedAt = lastUsedAt
+		}
+	}
 
 
 	/**
@@ -57,16 +73,16 @@ class CopilotApiService {
 	/**
 	 * Execute a non-streaming interaction request against a model endpoint.
 	 */
-	Map interact(String baseUrl, String token, String endpointPath, Map requestBody) {
+	Map interact(String baseUrl, String token, String endpointPath, Map requestBody, Map opts = [:]) {
 		String path = endpointPath ?: DEFAULT_INTERACTION_PATH
-		return executePost(baseUrl, path, token, requestBody)
+		return executePost(baseUrl, path, token, requestBody, opts)
 	}
 
 	/**
 	 * Execute a non-streaming responses API request.
 	 */
-	Map responsesCompletion(String baseUrl, String token, Map requestBody) {
-		return interact(baseUrl, token, RESPONSES_PATH, requestBody)
+	Map responsesCompletion(String baseUrl, String token, Map requestBody, Map opts = [:]) {
+		return interact(baseUrl, token, RESPONSES_PATH, requestBody, opts)
 	}
 
 	/**
@@ -85,7 +101,7 @@ class CopilotApiService {
 	/**
 	 * Execute a streaming interaction request via SSE.
 	 */
-	void streamInteract(String baseUrl, String token, String endpointPath, Map requestBody, LlmStreamingResponseHandler handler) {
+	void streamInteract(String baseUrl, String token, String endpointPath, Map requestBody, LlmStreamingResponseHandler handler, Map opts = [:]) {
 		CloseableHttpResponse response = null
 		try {
 			requestBody.stream = true
@@ -96,58 +112,60 @@ class CopilotApiService {
 				(COPILOT_INTEGRATION_HEADER): COPILOT_INTEGRATION_ID
 			], requestBody, DEFAULT_INTERACT_READ_TIMEOUT)
 
-			ServiceResponse<CloseableHttpResponse> apiResponse = apiClient.callStreamApi(baseUrl, path, null, null, requestOptions, 'POST')
-			response = apiResponse?.data
-			if(apiResponse?.success != true || response == null) {
-				String statusCode = apiResponse?.errorCode ?: response?.statusLine?.statusCode?.toString() ?: 'unknown'
-				String errorBody = readErrorBody(response)
-				String errorMsg = errorBody ?: buildErrorMessage(apiResponse)
-				handler?.onError(new RuntimeException("Copilot API returned ${statusCode}: ${errorMsg}"))
-				return
-			}
+			withApiClient(opts) { HttpApiClient apiClient ->
+				ServiceResponse<CloseableHttpResponse> apiResponse = apiClient.callStreamApi(baseUrl, path, null, null, requestOptions, 'POST')
+				response = apiResponse?.data
+				if(apiResponse?.success != true || response == null) {
+					String statusCode = apiResponse?.errorCode ?: response?.statusLine?.statusCode?.toString() ?: 'unknown'
+					String errorBody = readErrorBody(response)
+					String errorMsg = errorBody ?: buildErrorMessage(apiResponse)
+					handler?.onError(new RuntimeException("Copilot API returned ${statusCode}: ${errorMsg}"))
+					return
+				}
 
-			StringBuilder fullContent = new StringBuilder()
-			String responseModel = null
-			String finishReason = null
+				StringBuilder fullContent = new StringBuilder()
+				String responseModel = null
+				String finishReason = null
 
-			response.entity?.content?.withReader('UTF-8') { reader ->
-				String line
-				while ((line = reader.readLine()) != null) {
-					if (line.startsWith('data: ')) {
-						String data = line.substring(6).trim()
-						if (data == '[DONE]') {
-							break
-						}
-						try {
-							Map chunk = new JsonSlurper().parseText(data) as Map
-							responseModel = responseModel ?: chunk.model?.toString()
-							def choices = chunk.choices
-							if (choices instanceof List && choices.size() > 0) {
-								def delta = choices[0].delta
-								if (delta?.content) {
-									String partialText = delta.content.toString()
-									fullContent.append(partialText)
-									handler?.onPartialResponse(partialText)
-								}
-								if (choices[0].finish_reason) {
-									finishReason = choices[0].finish_reason.toString()
-								}
+				response.entity?.content?.withReader('UTF-8') { reader ->
+					String line
+					while ((line = reader.readLine()) != null) {
+						if (line.startsWith('data: ')) {
+							String data = line.substring(6).trim()
+							if (data == '[DONE]') {
+								break
 							}
-						} catch (Exception parseEx) {
-							log.debug("Skipping unparseable SSE chunk: ${data}")
+							try {
+								Map chunk = new JsonSlurper().parseText(data) as Map
+								responseModel = responseModel ?: chunk.model?.toString()
+								def choices = chunk.choices
+								if (choices instanceof List && choices.size() > 0) {
+									def delta = choices[0].delta
+									if (delta?.content) {
+										String partialText = delta.content.toString()
+										fullContent.append(partialText)
+										handler?.onPartialResponse(partialText)
+									}
+									if (choices[0].finish_reason) {
+										finishReason = choices[0].finish_reason.toString()
+									}
+								}
+							} catch (Exception parseEx) {
+								log.debug("Skipping unparseable SSE chunk: ${data}")
+							}
 						}
 					}
 				}
-			}
 
-			LlmChatResponse streamResponse = new LlmChatResponse()
-			streamResponse.model = responseModel
-			streamResponse.finishReason = finishReason
-			LlmChatMessage msg = new LlmChatMessage()
-			msg.role = 'assistant'
-			msg.content = fullContent.toString()
-			streamResponse.message = msg
-			handler?.onCompleteResponse(streamResponse)
+				LlmChatResponse streamResponse = new LlmChatResponse()
+				streamResponse.model = responseModel
+				streamResponse.finishReason = finishReason
+				LlmChatMessage msg = new LlmChatMessage()
+				msg.role = 'assistant'
+				msg.content = fullContent.toString()
+				streamResponse.message = msg
+				handler?.onCompleteResponse(streamResponse)
+			}
 
 		} catch (Exception e) {
 			log.error("Error during streaming chat completion: ${e.message}", e)
@@ -160,21 +178,23 @@ class CopilotApiService {
 	/**
 	 * Execute a GET request against the Copilot API.
 	 */
-	protected Map executeGet(String baseUrl, String path, String token) {
+	protected Map executeGet(String baseUrl, String path, String token, Map opts = [:]) {
 		try {
 			HttpApiClient.RequestOptions requestOptions = buildRequestOptions(token, [
 				'Accept'                    : 'application/json',
 				(COPILOT_INTEGRATION_HEADER): COPILOT_INTEGRATION_ID
 			], null, DEFAULT_READ_TIMEOUT)
-			ServiceResponse apiResponse = apiClient.callJsonApi(baseUrl, path, null, null, requestOptions, 'GET')
-			if(apiResponse?.success) {
-				Map responseData = apiResponse?.data instanceof Map ? apiResponse.data as Map : [:]
-				if(!(apiResponse?.data instanceof Map) && apiResponse?.data != null) {
-					responseData.data = apiResponse.data
+			return withApiClient(opts) { HttpApiClient apiClient ->
+				ServiceResponse apiResponse = apiClient.callJsonApi(baseUrl, path, null, null, requestOptions, 'GET')
+				if(apiResponse?.success) {
+					Map responseData = apiResponse?.data instanceof Map ? apiResponse.data as Map : [:]
+					if(!(apiResponse?.data instanceof Map) && apiResponse?.data != null) {
+						responseData.data = apiResponse.data
+					}
+					return [success: true, data: responseData, headers: apiResponse?.headers]
+				} else {
+					return [success: false, msg: buildErrorMessage(apiResponse), headers: apiResponse?.headers]
 				}
-				return [success: true, data: responseData, headers: apiResponse?.headers]
-			} else {
-				return [success: false, msg: buildErrorMessage(apiResponse), headers: apiResponse?.headers]
 			}
 		} catch (Exception e) {
 			log.error("Error executing GET ${baseUrl}${path}: ${e.message}", e)
@@ -185,22 +205,24 @@ class CopilotApiService {
 	/**
 	 * Execute a POST request against the Copilot API.
 	 */
-	protected Map executePost(String baseUrl, String path, String token, Map requestBody) {
+	protected Map executePost(String baseUrl, String path, String token, Map requestBody, Map opts = [:]) {
 		try {
 			HttpApiClient.RequestOptions requestOptions = buildRequestOptions(token, [
 				'Content-Type'              : 'application/json',
 				'Accept'                    : 'application/json',
 				(COPILOT_INTEGRATION_HEADER): COPILOT_INTEGRATION_ID
 			], requestBody, DEFAULT_INTERACT_READ_TIMEOUT)
-			ServiceResponse apiResponse = apiClient.callJsonApi(baseUrl, path, null, null, requestOptions, 'POST')
-			if(apiResponse?.success) {
-				Map responseData = apiResponse?.data instanceof Map ? apiResponse.data as Map : [:]
-				if(!(apiResponse?.data instanceof Map) && apiResponse?.data != null) {
-					responseData.data = apiResponse.data
+			return withApiClient(opts) { HttpApiClient apiClient ->
+				ServiceResponse apiResponse = apiClient.callJsonApi(baseUrl, path, null, null, requestOptions, 'POST')
+				if(apiResponse?.success) {
+					Map responseData = apiResponse?.data instanceof Map ? apiResponse.data as Map : [:]
+					if(!(apiResponse?.data instanceof Map) && apiResponse?.data != null) {
+						responseData.data = apiResponse.data
+					}
+					return [success: true, data: responseData, headers: apiResponse?.headers]
+				} else {
+					return [success: false, msg: buildErrorMessage(apiResponse), headers: apiResponse?.headers]
 				}
-				return [success: true, data: responseData, headers: apiResponse?.headers]
-			} else {
-				return [success: false, msg: buildErrorMessage(apiResponse), headers: apiResponse?.headers]
 			}
 		} catch (Exception e) {
 			log.error("Error executing POST ${baseUrl}${path}: ${e.message}", e)
@@ -208,7 +230,57 @@ class CopilotApiService {
 		}
 	}
 
-	protected final HttpApiClient apiClient = new HttpApiClient()
+	protected <T> T withApiClient(Map opts = [:], Closure<T> work) {
+		evictExpiredSessionClients()
+		String clientScopeKey = resolveClientScopeKey(opts)
+		if(clientScopeKey) {
+			long now = System.currentTimeMillis()
+			SessionClientHolder sessionClient = sessionClients.compute(clientScopeKey) { String key, SessionClientHolder existing ->
+				if(existing && !isExpired(existing, now)) {
+					existing.lastUsedAt = now
+					return existing
+				}
+				if(existing?.apiClient) {
+					shutdownApiClient(existing.apiClient)
+				}
+				return new SessionClientHolder(createApiClient(true), now)
+			}
+			return work.call(sessionClient.apiClient)
+		}
+
+		HttpApiClient apiClient = createApiClient(false)
+		try {
+			return work.call(apiClient)
+		} finally {
+			shutdownApiClient(apiClient)
+		}
+	}
+
+	protected String resolveClientScopeKey(Map opts = [:]) {
+		String clientScopeKey = opts?.get(CLIENT_SCOPE_KEY)?.toString()?.trim()
+		return clientScopeKey ?: null
+	}
+
+	protected HttpApiClient createApiClient(boolean sessionScoped) {
+		return sessionScoped ? new HttpApiClient(true) : new HttpApiClient()
+	}
+
+	protected void shutdownApiClient(HttpApiClient apiClient) {
+		apiClient?.shutdownClient()
+	}
+
+	protected void evictExpiredSessionClients() {
+		long now = System.currentTimeMillis()
+		sessionClients.each { String clientScopeKey, SessionClientHolder holder ->
+			if(holder && isExpired(holder, now) && sessionClients.remove(clientScopeKey, holder)) {
+				shutdownApiClient(holder.apiClient)
+			}
+		}
+	}
+
+	protected boolean isExpired(SessionClientHolder holder, long now = System.currentTimeMillis()) {
+		return holder == null || (now - holder.lastUsedAt) > SESSION_CLIENT_TTL_MS
+	}
 
 	protected HttpApiClient.RequestOptions buildRequestOptions(String token, Map<CharSequence, CharSequence> headers, Object body, Integer readTimeout) {
 		HttpApiClient.RequestOptions options = new HttpApiClient.RequestOptions(
