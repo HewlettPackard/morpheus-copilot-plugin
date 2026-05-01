@@ -99,6 +99,10 @@ class CopilotProviderSpec extends Specification {
 		urlOpt.defaultValue == 'https://api.githubcopilot.com'
 		def credOpt = opts.find { it.fieldContext == 'credential' }
 		credOpt.name == 'Credentials'
+		def pwdOpt = opts.find { it.fieldName == 'servicePassword' }
+		pwdOpt != null
+		pwdOpt.localCredential == true
+		pwdOpt.fieldLabel == 'API Key'
 	}
 
 	// --- Verify ---
