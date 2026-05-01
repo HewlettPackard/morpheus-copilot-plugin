@@ -129,6 +129,20 @@ static final String DEFAULT_CHAT_MODEL = 'claude-sonnet-4.6'
 		)
 		optionTypes.add(credentials);
 
+		// Local credential field — shown when "Local Credentials" is selected
+		OptionType servicePassword = new OptionType(
+			code: "${PROVIDER_CODE}.servicePassword",
+			name: "API Key",
+			inputType: OptionType.InputType.PASSWORD,
+			fieldName: "servicePassword",
+			fieldLabel: "API Key",
+			fieldContext: "domain",
+			displayOrder: 2,
+			required: true,
+			localCredential: true
+		)
+		optionTypes.add(servicePassword);
+
 		return optionTypes
 	}
 
