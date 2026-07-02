@@ -118,7 +118,13 @@ class CopilotApiService {
 				if(apiResponse?.success != true || response == null) {
 					String statusCode = apiResponse?.errorCode ?: response?.statusLine?.statusCode?.toString() ?: 'unknown'
 					String errorBody = readErrorBody(response)
-					String errorMsg = errorBody ?: buildErrorMessage(apiResponse)
+					String errorMsg = errorBody
+						? (errorBody.length() > 500 ? errorBody.substring(0, 500) + "…[truncated]" : errorBody)
+						: buildErrorMessage(apiResponse)
+					log.warn("Copilot API error response (status={}): {}", statusCode, errorMsg)
+					if(errorBody && errorBody.length() > 500 && log.isDebugEnabled()) {
+						log.debug("Copilot API error response body (status={}): {}", statusCode, errorBody)
+					}
 					handler?.onError(new RuntimeException("Copilot API returned ${statusCode}: ${errorMsg}"))
 					return
 				}
