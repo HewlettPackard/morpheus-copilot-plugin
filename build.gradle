@@ -74,7 +74,7 @@ jar {
 			'Morpheus-Logo-Dark': 'assets/copilot-white.svg',
 			'Morpheus-Color': '#000000',
 			'Morpheus-Labels': 'Plugin, LLM, AI, GitHub, Copilot',
-			'Morpheus-Repo': 'https://github.com/gomorpheus/morpheus-copilot-plugin',
+			'Morpheus-Repo': 'https://github.com/HewlettPackard/morpheus-copilot-plugin',
 			'Morpheus-Min-Appliance-Version': morpheusMinApplianceVersion
 		)
 	}
